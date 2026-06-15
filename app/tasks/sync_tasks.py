@@ -23,6 +23,74 @@ def _get_db() -> Session:
     return _SessionLocal()
 
 
+def _normalize_message_id(value: Any) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    if not normalized or normalized.lower() in {"none", "null"}:
+        return None
+    return normalized
+
+
+def _normalized_payload(message: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(message)
+    payload["message_id"] = _normalize_message_id(payload.get("message_id"))
+    return payload
+
+
+def _find_existing_message(db: Session, Message, account_id, folder_id, message: dict[str, Any]):
+    message_id = _normalize_message_id(message.get("message_id"))
+    if message_id:
+        existing = db.query(Message).filter(
+            Message.account_id == account_id,
+            Message.folder_id == folder_id,
+            Message.message_id == message_id,
+        ).first()
+        if existing:
+            return existing
+
+    uid = message.get("uid")
+    if uid is not None:
+        existing = db.query(Message).filter(
+            Message.account_id == account_id,
+            Message.folder_id == folder_id,
+            Message.uid == uid,
+        ).first()
+        if existing:
+            return existing
+
+    timestamp = message.get("received_at") or message.get("sent_at")
+    from_address = message.get("from_address")
+    if timestamp and from_address:
+        return db.query(Message).filter(
+            Message.account_id == account_id,
+            Message.folder_id == folder_id,
+            Message.subject == message.get("subject"),
+            Message.from_address == from_address,
+            Message.received_at == message.get("received_at"),
+            Message.sent_at == message.get("sent_at"),
+            Message.preview == message.get("preview"),
+        ).first()
+    return None
+
+
+def _merge_existing_message(existing, message: dict[str, Any], MessageStatus) -> None:
+    message_id = _normalize_message_id(message.get("message_id"))
+    if message_id and not existing.message_id:
+        existing.message_id = message_id
+    if message.get("uid") is not None and existing.uid is None:
+        existing.uid = message["uid"]
+    if message.get("thread_id") and not existing.thread_id:
+        existing.thread_id = message["thread_id"]
+
+    for field in ("is_read", "is_flagged", "is_draft", "is_deleted", "is_spam"):
+        if field in message:
+            setattr(existing, field, bool(message[field]))
+
+    if "is_read" in message:
+        existing.status = MessageStatus.READ if message["is_read"] else MessageStatus.UNREAD
+
+
 def sync_account_now(account_id: str, *, raise_on_error: bool = False) -> dict[str, Any]:
     from app.models.email_account import EmailAccount, AccountType, AccountStatus
 
@@ -159,11 +227,8 @@ def _sync_imap(db: Session, account):
             )
 
             for m in msgs:
-                existing = db.query(Message).filter(
-                    Message.account_id == account.id,
-                    Message.uid == m["uid"],
-                    Message.folder_id == folder.id,
-                ).first()
+                m = _normalized_payload(m)
+                existing = _find_existing_message(db, Message, account.id, folder.id, m)
                 if not existing:
                     cols = {c.name for c in Message.__table__.columns}
                     msg = Message(
@@ -182,6 +247,8 @@ def _sync_imap(db: Session, account):
                                 rule.last_triggered_at = datetime.utcnow()
                                 if rule.stop_processing:
                                     break
+                else:
+                    _merge_existing_message(existing, m, MessageStatus)
             db.flush()
     finally:
         loop.close()
@@ -214,11 +281,8 @@ def _sync_gmail(db: Session, account):
             max_results=100,
         )
         for m in messages:
-            existing = db.query(Message).filter(
-                Message.account_id == account.id,
-                Message.message_id == m["message_id"],
-                Message.folder_id == folder.id,
-            ).first()
+            m = _normalized_payload(m)
+            existing = _find_existing_message(db, Message, account.id, folder.id, m)
             if not existing:
                 db.add(Message(
                     account_id=account.id,
@@ -226,6 +290,8 @@ def _sync_gmail(db: Session, account):
                     status=MessageStatus.UNREAD if not m["is_read"] else MessageStatus.READ,
                     **{k: v for k, v in m.items() if k in cols},
                 ))
+            else:
+                _merge_existing_message(existing, m, MessageStatus)
     db.flush()
 
 
@@ -266,11 +332,8 @@ def _sync_outlook(db: Session, account):
             limit=100,
         )
         for m in messages:
-            existing = db.query(Message).filter(
-                Message.account_id == account.id,
-                Message.message_id == m["message_id"],
-                Message.folder_id == folder.id,
-            ).first()
+            m = _normalized_payload(m)
+            existing = _find_existing_message(db, Message, account.id, folder.id, m)
             if not existing:
                 db.add(Message(
                     account_id=account.id,
@@ -278,6 +341,8 @@ def _sync_outlook(db: Session, account):
                     status=MessageStatus.UNREAD if not m["is_read"] else MessageStatus.READ,
                     **{k: v for k, v in m.items() if k in cols},
                 ))
+            else:
+                _merge_existing_message(existing, m, MessageStatus)
     db.flush()
 
 

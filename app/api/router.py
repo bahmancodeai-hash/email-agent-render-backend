@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 from app.api import auth, accounts, emails, devices, sync, rules, webhooks
 from app.api import import_accounts, mcp_http
+from app.api import maintenance
 
 api_router = APIRouter()
 
@@ -13,3 +14,4 @@ api_router.include_router(sync.router, prefix="/sync", tags=["sync"])
 api_router.include_router(rules.router, prefix="/rules", tags=["rules"])
 api_router.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])
 api_router.include_router(mcp_http.router, prefix="/mcp", tags=["mcp"])
+api_router.include_router(maintenance.router, prefix="/maintenance", tags=["maintenance"])
