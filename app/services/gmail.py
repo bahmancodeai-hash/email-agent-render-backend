@@ -1,5 +1,6 @@
 import base64
 import json
+import os
 from datetime import datetime
 from typing import Optional
 
@@ -12,10 +13,15 @@ from app.config import settings
 from app.services.crypto import decrypt_credentials, encrypt_credentials
 
 
-SCOPES = [
+REQUIRED_GMAIL_SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/gmail.modify",
+]
+
+SCOPES = [
+    *REQUIRED_GMAIL_SCOPES,
+    "openid",
     "https://www.googleapis.com/auth/userinfo.email",
 ]
 
@@ -48,8 +54,13 @@ def get_auth_url(state: str) -> str:
 
 def exchange_code(code: str) -> dict:
     flow = get_oauth_flow()
+    os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
     flow.fetch_token(code=code)
     creds = flow.credentials
+    granted_scopes = set(creds.scopes or [])
+    missing_required = [scope for scope in REQUIRED_GMAIL_SCOPES if scope not in granted_scopes]
+    if missing_required:
+        raise ValueError(f"Gmail did not grant required permissions: {', '.join(missing_required)}")
     return {
         "token": creds.token,
         "refresh_token": creds.refresh_token,
