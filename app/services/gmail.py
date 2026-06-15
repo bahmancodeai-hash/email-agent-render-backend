@@ -95,19 +95,97 @@ def get_user_email(encrypted_credentials: str) -> str:
 def list_messages(encrypted_credentials: str, folder: str = "INBOX", max_results: int = 50) -> list[dict]:
     service, _ = _build_service(encrypted_credentials)
     label_id = _folder_to_label(folder)
-    result = service.users().messages().list(
-        userId="me", labelIds=[label_id], maxResults=max_results
+    messages = []
+    page_token = None
+    while len(messages) < max_results:
+        request_limit = min(500, max_results - len(messages))
+        result = service.users().messages().list(
+            userId="me",
+            labelIds=[label_id],
+            maxResults=request_limit,
+            pageToken=page_token,
+        ).execute()
+
+        for item in result.get("messages", []):
+            msg_data = service.users().messages().get(
+                userId="me", id=item["id"], format="full"
+            ).execute()
+            parsed = _parse_gmail_message(msg_data)
+            if parsed:
+                messages.append(parsed)
+
+        page_token = result.get("nextPageToken")
+        if not page_token:
+            break
+    return messages
+
+
+def list_message_ids(encrypted_credentials: str, folder: str = "INBOX", max_results: int = 1000) -> list[str]:
+    service, _ = _build_service(encrypted_credentials)
+    label_id = _folder_to_label(folder)
+    ids: list[str] = []
+    page_token = None
+    while len(ids) < max_results:
+        request_limit = min(500, max_results - len(ids))
+        result = service.users().messages().list(
+            userId="me",
+            labelIds=[label_id],
+            maxResults=request_limit,
+            pageToken=page_token,
+            fields="messages/id,nextPageToken",
+        ).execute()
+        ids.extend(item["id"] for item in result.get("messages", []) if item.get("id"))
+        page_token = result.get("nextPageToken")
+        if not page_token:
+            break
+    return ids
+
+
+def mark_read(encrypted_credentials: str, remote_id: str, is_read: bool = True) -> None:
+    service, _ = _build_service(encrypted_credentials)
+    body = {"removeLabelIds": ["UNREAD"]} if is_read else {"addLabelIds": ["UNREAD"]}
+    service.users().messages().modify(userId="me", id=remote_id, body=body).execute()
+
+
+def set_starred(encrypted_credentials: str, remote_id: str, is_flagged: bool = True) -> None:
+    service, _ = _build_service(encrypted_credentials)
+    body = {"addLabelIds": ["STARRED"]} if is_flagged else {"removeLabelIds": ["STARRED"]}
+    service.users().messages().modify(userId="me", id=remote_id, body=body).execute()
+
+
+def archive_message(encrypted_credentials: str, remote_id: str) -> None:
+    service, _ = _build_service(encrypted_credentials)
+    service.users().messages().modify(
+        userId="me",
+        id=remote_id,
+        body={"removeLabelIds": ["INBOX"]},
     ).execute()
 
-    messages = []
-    for item in result.get("messages", []):
+
+def trash_message(encrypted_credentials: str, remote_id: str) -> None:
+    service, _ = _build_service(encrypted_credentials)
+    service.users().messages().trash(userId="me", id=remote_id).execute()
+
+
+def get_message_state(encrypted_credentials: str, remote_id: str) -> dict | None:
+    service, _ = _build_service(encrypted_credentials)
+    try:
         msg_data = service.users().messages().get(
-            userId="me", id=item["id"], format="full"
+            userId="me", id=remote_id, format="metadata", metadataHeaders=["Message-ID"]
         ).execute()
-        parsed = _parse_gmail_message(msg_data)
-        if parsed:
-            messages.append(parsed)
-    return messages
+    except Exception:
+        return None
+    labels = msg_data.get("labelIds", [])
+    return {
+        "remote_id": msg_data.get("id"),
+        "thread_id": msg_data.get("threadId"),
+        "is_read": "UNREAD" not in labels,
+        "is_flagged": "STARRED" in labels,
+        "is_draft": "DRAFT" in labels,
+        "is_spam": "SPAM" in labels,
+        "is_deleted": "TRASH" in labels,
+        "labels": labels,
+    }
 
 
 def _folder_to_label(folder: str) -> str:
@@ -132,6 +210,7 @@ def _parse_gmail_message(msg_data: dict) -> Optional[dict]:
         body_text, body_html = _extract_body(msg_data.get("payload", {}))
 
         return {
+            "remote_id": gmail_id,
             "message_id": headers.get("message-id", gmail_id),
             "thread_id": thread_id,
             "subject": headers.get("subject", ""),

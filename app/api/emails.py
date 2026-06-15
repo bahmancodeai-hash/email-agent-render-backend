@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 import os
 import re
@@ -5,7 +6,7 @@ from datetime import datetime, date, timedelta
 from email.utils import parseaddr
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, or_, and_, String
+from sqlalchemy import select, or_, and_, String, func
 from pydantic import BaseModel
 import httpx
 
@@ -130,6 +131,65 @@ async def _get_message(db: AsyncSession, message_id: uuid.UUID, account_ids: lis
     if not msg:
         raise HTTPException(status_code=404, detail="Message not found")
     return msg
+
+
+async def _push_gmail_action(account: EmailAccount, msg: Message, action: str, **kwargs) -> None:
+    if account.account_type != AccountType.GMAIL or not msg.remote_id:
+        return
+
+    from app.services import gmail as gmail_service
+
+    def _run() -> None:
+        if action == "read":
+            gmail_service.mark_read(account.encrypted_credentials, msg.remote_id, kwargs.get("is_read", True))
+        elif action == "flag":
+            gmail_service.set_starred(account.encrypted_credentials, msg.remote_id, kwargs.get("is_flagged", True))
+        elif action == "archive":
+            gmail_service.archive_message(account.encrypted_credentials, msg.remote_id)
+        elif action == "delete":
+            gmail_service.trash_message(account.encrypted_credentials, msg.remote_id)
+
+    await asyncio.to_thread(_run)
+
+
+async def _refresh_counts(db: AsyncSession, account_id: uuid.UUID) -> None:
+    account = await db.get(EmailAccount, account_id)
+    if not account:
+        return
+
+    visible = (
+        select(func.count())
+        .select_from(Message)
+        .where(
+            Message.account_id == account_id,
+            Message.is_deleted == False,
+            Message.is_draft == False,
+        )
+    )
+    unread = visible.where(Message.is_read == False)
+    account.total_messages = await db.scalar(visible) or 0
+    account.unread_count = await db.scalar(unread) or 0
+
+    result = await db.execute(select(Folder).where(Folder.account_id == account_id))
+    for folder in result.scalars().all():
+        folder_visible = (
+            select(func.count())
+            .select_from(Message)
+            .where(
+                Message.account_id == account_id,
+                Message.folder_id == folder.id,
+                Message.is_deleted == False,
+                Message.is_draft == False,
+            )
+        )
+        if folder.folder_type == "trash":
+            folder_visible = (
+                select(func.count())
+                .select_from(Message)
+                .where(Message.account_id == account_id, Message.folder_id == folder.id)
+            )
+        folder.total_messages = await db.scalar(folder_visible) or 0
+        folder.unread_count = await db.scalar(folder_visible.where(Message.is_read == False)) or 0
 
 
 def _serialize(m: Message) -> dict:
@@ -405,12 +465,9 @@ async def smart_folder(
     else:
         raise HTTPException(status_code=404, detail=f"Unknown smart folder: {folder_name}")
 
-    query_limit = min(max(limit * 3, limit), 500) if folder_type else limit
-    q = q.order_by(Message.received_at.desc()).offset(offset).limit(query_limit)
+    q = q.order_by(Message.received_at.desc()).offset(offset).limit(limit)
     result = await db.execute(q)
     messages = result.scalars().all()
-    if folder_type:
-        messages = _dedupe_message_list(messages, limit)
     return [_serialize(m) for m in messages]
 
 
@@ -492,8 +549,11 @@ async def get_email(
     account_ids = await _get_user_account_ids(db, current_user.id)
     msg = await _get_message(db, message_id, account_ids)
     if not msg.is_read:
+        account = await _get_account(db, msg.account_id, current_user.id)
+        await _push_gmail_action(account, msg, "read", is_read=True)
         msg.is_read = True
         msg.status = MessageStatus.READ
+        await _refresh_counts(db, msg.account_id)
     return _serialize(msg)
 
 
@@ -732,8 +792,11 @@ async def mark_read(
 ):
     account_ids = await _get_user_account_ids(db, current_user.id)
     msg = await _get_message(db, message_id, account_ids)
+    account = await _get_account(db, msg.account_id, current_user.id)
+    await _push_gmail_action(account, msg, "read", is_read=is_read)
     msg.is_read = is_read
     msg.status = MessageStatus.READ if is_read else MessageStatus.UNREAD
+    await _refresh_counts(db, msg.account_id)
     return {"updated": True}
 
 
@@ -746,7 +809,10 @@ async def toggle_flag(
 ):
     account_ids = await _get_user_account_ids(db, current_user.id)
     msg = await _get_message(db, message_id, account_ids)
+    account = await _get_account(db, msg.account_id, current_user.id)
+    await _push_gmail_action(account, msg, "flag", is_flagged=is_flagged)
     msg.is_flagged = is_flagged
+    await _refresh_counts(db, msg.account_id)
     return {"updated": True}
 
 
@@ -758,6 +824,8 @@ async def archive_email(
 ):
     account_ids = await _get_user_account_ids(db, current_user.id)
     msg = await _get_message(db, message_id, account_ids)
+    account = await _get_account(db, msg.account_id, current_user.id)
+    await _push_gmail_action(account, msg, "archive")
 
     result = await db.execute(
         select(Folder).where(
@@ -769,6 +837,7 @@ async def archive_email(
     if archive_folder:
         msg.folder_id = archive_folder.id
     msg.is_read = True
+    await _refresh_counts(db, msg.account_id)
     return {"archived": True}
 
 
@@ -816,8 +885,11 @@ async def delete_email(
 ):
     account_ids = await _get_user_account_ids(db, current_user.id)
     msg = await _get_message(db, message_id, account_ids)
+    account = await _get_account(db, msg.account_id, current_user.id)
+    await _push_gmail_action(account, msg, "delete")
     msg.is_deleted = True
     msg.status = MessageStatus.DELETED
+    await _refresh_counts(db, msg.account_id)
     return {"deleted": True}
 
 

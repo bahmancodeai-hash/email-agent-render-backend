@@ -17,6 +17,8 @@ _engine = create_engine(_sync_url, pool_pre_ping=True, pool_size=10, max_overflo
 _SessionLocal = sessionmaker(bind=_engine)
 SYNC_FOLDER_TYPES = {"inbox", "sent", "drafts", "trash", "spam", "archive"}
 GMAIL_SYNC_FOLDER_TYPES = SYNC_FOLDER_TYPES - {"archive"}
+GMAIL_FETCH_LIMIT = 150
+GMAIL_RECONCILE_LIMIT = 1000
 
 _FOLDER_PRIORITY = {
     "inbox": ["inbox"],
@@ -52,10 +54,21 @@ def _normalize_message_id(value: Any) -> str | None:
 def _normalized_payload(message: dict[str, Any]) -> dict[str, Any]:
     payload = dict(message)
     payload["message_id"] = _normalize_message_id(payload.get("message_id"))
+    payload["remote_id"] = _normalize_message_id(payload.get("remote_id"))
     return payload
 
 
 def _find_existing_message(db: Session, Message, account_id, folder_id, message: dict[str, Any]):
+    remote_id = _normalize_message_id(message.get("remote_id"))
+    if remote_id:
+        existing = db.query(Message).filter(
+            Message.account_id == account_id,
+            Message.folder_id == folder_id,
+            Message.remote_id == remote_id,
+        ).first()
+        if existing:
+            return existing
+
     message_id = _normalize_message_id(message.get("message_id"))
     if message_id:
         existing = db.query(Message).filter(
@@ -92,6 +105,10 @@ def _find_existing_message(db: Session, Message, account_id, folder_id, message:
 
 
 def _merge_existing_message(existing, message: dict[str, Any], MessageStatus) -> None:
+    remote_id = _normalize_message_id(message.get("remote_id"))
+    if remote_id and not getattr(existing, "remote_id", None):
+        existing.remote_id = remote_id
+
     message_id = _normalize_message_id(message.get("message_id"))
     if message_id and not existing.message_id:
         existing.message_id = message_id
@@ -199,6 +216,7 @@ def _is_auth_error(exc: Exception) -> bool:
 
 
 def _refresh_account_counts(db: Session, account) -> None:
+    from app.models.folder import Folder
     from app.models.message import Message
 
     visible_messages = db.query(Message).filter(
@@ -208,6 +226,37 @@ def _refresh_account_counts(db: Session, account) -> None:
     )
     account.total_messages = visible_messages.count()
     account.unread_count = visible_messages.filter(Message.is_read == False).count()
+
+    for folder in db.query(Folder).filter(Folder.account_id == account.id).all():
+        q = db.query(Message).filter(
+            Message.account_id == account.id,
+            Message.folder_id == folder.id,
+            Message.is_deleted == False,
+            Message.is_draft == False,
+        )
+        if folder.folder_type == "trash":
+            q = db.query(Message).filter(
+                Message.account_id == account.id,
+                Message.folder_id == folder.id,
+            )
+        folder.total_messages = q.count()
+        folder.unread_count = q.filter(Message.is_read == False).count()
+
+
+def _reconcile_gmail_folder(db: Session, Message, MessageStatus, account, folder, present_remote_ids: set[str]) -> None:
+    if len(present_remote_ids) >= GMAIL_RECONCILE_LIMIT:
+        return
+
+    stale = db.query(Message).filter(
+        Message.account_id == account.id,
+        Message.folder_id == folder.id,
+        Message.remote_id != None,
+        Message.is_draft == False,
+        Message.remote_id.notin_(present_remote_ids),
+    ).all()
+    for msg in stale:
+        msg.is_deleted = True
+        msg.status = MessageStatus.DELETED
 
 
 def _sync_imap(db: Session, account):
@@ -320,10 +369,16 @@ def _sync_gmail(db: Session, account):
             db.add(folder)
             db.flush()
 
+        present_remote_ids = set(gmail_service.list_message_ids(
+            account.encrypted_credentials,
+            folder=folder_type,
+            max_results=GMAIL_RECONCILE_LIMIT,
+        ))
+
         messages = gmail_service.list_messages(
             account.encrypted_credentials,
             folder=folder_type,
-            max_results=100,
+            max_results=GMAIL_FETCH_LIMIT,
         )
         for m in messages:
             m = _normalized_payload(m)
@@ -337,6 +392,8 @@ def _sync_gmail(db: Session, account):
                 ))
             else:
                 _merge_existing_message(existing, m, MessageStatus)
+
+        _reconcile_gmail_folder(db, Message, MessageStatus, account, folder, present_remote_ids)
     db.flush()
 
 

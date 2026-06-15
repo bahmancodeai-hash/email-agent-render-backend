@@ -25,6 +25,7 @@ class Message(Base):
 
     # Remote identifiers
     uid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    remote_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     message_id: Mapped[str | None] = mapped_column(String(512), nullable=True, index=True)  # Message-ID header
     thread_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)  # Gmail thread ID
 

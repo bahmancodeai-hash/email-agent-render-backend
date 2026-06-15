@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
 from app.config import settings
 from app.database import engine, Base
@@ -8,11 +9,18 @@ from app.api.router import api_router
 from app.services.background_scheduler import background_scheduler
 
 
+async def _ensure_runtime_schema() -> None:
+    async with engine.begin() as conn:
+        await conn.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS remote_id VARCHAR(255)"))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_messages_remote_id ON messages (remote_id)"))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if settings.auto_create_tables:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+        await _ensure_runtime_schema()
     await background_scheduler.start()
     try:
         yield
