@@ -155,6 +155,30 @@ def _serialize(m: Message) -> dict:
     }
 
 
+def _list_dedupe_key(m: Message) -> tuple:
+    return (
+        str(m.account_id),
+        (m.subject or "").strip().lower(),
+        (m.from_address or "").strip().lower(),
+        m.received_at.isoformat() if m.received_at else "",
+        (m.preview or "").strip().lower(),
+    )
+
+
+def _dedupe_message_list(messages: list[Message], limit: int) -> list[Message]:
+    seen = set()
+    result = []
+    for message in messages:
+        key = _list_dedupe_key(message)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(message)
+        if len(result) >= limit:
+            break
+    return result
+
+
 def _email_only(value: str | None) -> str:
     if not value:
         return ""
@@ -381,9 +405,13 @@ async def smart_folder(
     else:
         raise HTTPException(status_code=404, detail=f"Unknown smart folder: {folder_name}")
 
-    q = q.order_by(Message.received_at.desc()).offset(offset).limit(limit)
+    query_limit = min(max(limit * 3, limit), 500) if folder_type else limit
+    q = q.order_by(Message.received_at.desc()).offset(offset).limit(query_limit)
     result = await db.execute(q)
-    return [_serialize(m) for m in result.scalars().all()]
+    messages = result.scalars().all()
+    if folder_type:
+        messages = _dedupe_message_list(messages, limit)
+    return [_serialize(m) for m in messages]
 
 
 # ── List / Get ───────────────────────────────────────────────────────────────

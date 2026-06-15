@@ -18,6 +18,23 @@ _SessionLocal = sessionmaker(bind=_engine)
 SYNC_FOLDER_TYPES = {"inbox", "sent", "drafts", "trash", "spam", "archive"}
 GMAIL_SYNC_FOLDER_TYPES = SYNC_FOLDER_TYPES - {"archive"}
 
+_FOLDER_PRIORITY = {
+    "inbox": ["inbox"],
+    "sent": ["sent", "sent mail", "sent messages", "sent items"],
+    "drafts": ["drafts", "draft"],
+    "trash": ["trash", "deleted messages", "deleted items", "bin"],
+    "spam": ["spam", "junk", "bulk mail"],
+    "archive": ["archive", "all mail"],
+}
+
+_GMAIL_FOLDER_PRIORITY = {
+    "sent": ["[gmail]/sent mail", "sent mail", "sent"],
+    "drafts": ["[gmail]/drafts", "drafts"],
+    "trash": ["[gmail]/trash", "trash", "bin"],
+    "spam": ["[gmail]/spam", "spam", "junk"],
+    "archive": ["[gmail]/all mail", "all mail", "archive"],
+}
+
 
 def _get_db() -> Session:
     return _SessionLocal()
@@ -89,6 +106,33 @@ def _merge_existing_message(existing, message: dict[str, Any], MessageStatus) ->
 
     if "is_read" in message:
         existing.status = MessageStatus.READ if message["is_read"] else MessageStatus.UNREAD
+
+
+def _folder_priority(account, folder) -> tuple[int, int, str]:
+    remote = (folder.remote_name or folder.name or "").replace("\\", "/").lower()
+    base = remote.rsplit("/", 1)[-1]
+    folder_type = folder.folder_type
+    preferred = _FOLDER_PRIORITY.get(folder_type, [])
+    if "gmail" in (account.imap_host or "").lower():
+        preferred = _GMAIL_FOLDER_PRIORITY.get(folder_type, preferred)
+
+    for index, name in enumerate(preferred):
+        if remote == name:
+            return (index, len(remote), remote)
+        if base == name:
+            return (index + 20, len(remote), remote)
+    if folder_type in remote:
+        return (200, len(remote), remote)
+    return (500, len(remote), remote)
+
+
+def _select_sync_folders(account, folders: list) -> list:
+    selected = {}
+    for folder in folders:
+        current = selected.get(folder.folder_type)
+        if current is None or _folder_priority(account, folder) < _folder_priority(account, current):
+            selected[folder.folder_type] = folder
+    return sorted(selected.values(), key=lambda f: f.folder_type)
 
 
 def sync_account_now(account_id: str, *, raise_on_error: bool = False) -> dict[str, Any]:
@@ -201,6 +245,7 @@ def _sync_imap(db: Session, account):
             Folder.account_id == account.id,
             Folder.folder_type.in_(SYNC_FOLDER_TYPES),
         ).order_by(Folder.folder_type).all()
+        sync_folders = _select_sync_folders(account, sync_folders)
 
         rules = db.query(EmailRule).filter(
             EmailRule.user_id == account.user_id,
@@ -325,6 +370,7 @@ def _sync_outlook(db: Session, account):
         Folder.account_id == account.id,
         Folder.folder_type.in_(SYNC_FOLDER_TYPES),
     ).all()
+    sync_folders = _select_sync_folders(account, sync_folders)
     for folder in sync_folders:
         messages = outlook_service.list_messages(
             account.encrypted_credentials,
