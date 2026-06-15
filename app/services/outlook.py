@@ -120,6 +120,51 @@ def list_messages(encrypted_credentials: str, folder_id: str = "inbox", limit: i
     return [_parse_message(m) for m in resp.json().get("value", [])]
 
 
+def mark_read(encrypted_credentials: str, remote_id: str, is_read: bool = True) -> None:
+    _patch_message(encrypted_credentials, remote_id, {"isRead": is_read})
+
+
+def set_flagged(encrypted_credentials: str, remote_id: str, is_flagged: bool = True) -> None:
+    _patch_message(
+        encrypted_credentials,
+        remote_id,
+        {"flag": {"flagStatus": "flagged" if is_flagged else "notFlagged"}},
+    )
+
+
+def move_message(encrypted_credentials: str, remote_id: str, destination_id: str) -> str | None:
+    token = _get_valid_token(encrypted_credentials)
+    resp = httpx.post(
+        f"{GRAPH_BASE}/me/messages/{remote_id}/move",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json={"destinationId": destination_id},
+        timeout=20,
+    )
+    resp.raise_for_status()
+    return resp.json().get("id")
+
+
+def delete_message(encrypted_credentials: str, remote_id: str) -> None:
+    token = _get_valid_token(encrypted_credentials)
+    resp = httpx.delete(
+        f"{GRAPH_BASE}/me/messages/{remote_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=20,
+    )
+    resp.raise_for_status()
+
+
+def _patch_message(encrypted_credentials: str, remote_id: str, payload: dict) -> None:
+    token = _get_valid_token(encrypted_credentials)
+    resp = httpx.patch(
+        f"{GRAPH_BASE}/me/messages/{remote_id}",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=20,
+    )
+    resp.raise_for_status()
+
+
 def _parse_message(m: dict) -> dict:
     sender = m.get("from", {}).get("emailAddress", {})
     received = m.get("receivedDateTime")

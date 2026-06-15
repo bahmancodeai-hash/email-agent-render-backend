@@ -94,6 +94,50 @@ def _fetch_messages_sync(
         client.logout()
 
 
+def _update_flags_sync(
+    host: str,
+    port: int,
+    username: str,
+    password: str,
+    ssl: bool,
+    folder_name: str,
+    uid: int,
+    add_flags: list[bytes] | None = None,
+    remove_flags: list[bytes] | None = None,
+) -> None:
+    client = _connect_imap(host, port, username, password, ssl)
+    try:
+        client.select_folder(folder_name, readonly=False)
+        if add_flags:
+            client.add_flags([uid], add_flags, silent=True)
+        if remove_flags:
+            client.remove_flags([uid], remove_flags, silent=True)
+    finally:
+        client.logout()
+
+
+def _move_message_sync(
+    host: str,
+    port: int,
+    username: str,
+    password: str,
+    ssl: bool,
+    source_folder: str,
+    uid: int,
+    target_folder: str | None,
+) -> None:
+    client = _connect_imap(host, port, username, password, ssl)
+    try:
+        client.select_folder(source_folder, readonly=False)
+        if target_folder:
+            client.move([uid], target_folder)
+        else:
+            client.add_flags([uid], [b"\\Deleted"], silent=True)
+            client.expunge()
+    finally:
+        client.logout()
+
+
 def _parse_message(msg, uid: int, flags: list, internal_date) -> dict:
     def decode_header(value) -> str:
         if not value:
@@ -210,6 +254,73 @@ async def fetch_messages(
         _fetch_messages_sync,
         imap_host, imap_port, creds["username"], creds["password"], imap_ssl,
         folder_name, since_uid, limit
+    )
+
+
+async def mark_read(
+    encrypted_credentials: str,
+    imap_host: str,
+    imap_port: int,
+    imap_ssl: bool,
+    folder_name: str,
+    uid: int,
+    is_read: bool = True,
+) -> None:
+    add_flags = [b"\\Seen"] if is_read else None
+    remove_flags = None if is_read else [b"\\Seen"]
+    await _run_flag_update(encrypted_credentials, imap_host, imap_port, imap_ssl, folder_name, uid, add_flags, remove_flags)
+
+
+async def set_flagged(
+    encrypted_credentials: str,
+    imap_host: str,
+    imap_port: int,
+    imap_ssl: bool,
+    folder_name: str,
+    uid: int,
+    is_flagged: bool = True,
+) -> None:
+    add_flags = [b"\\Flagged"] if is_flagged else None
+    remove_flags = None if is_flagged else [b"\\Flagged"]
+    await _run_flag_update(encrypted_credentials, imap_host, imap_port, imap_ssl, folder_name, uid, add_flags, remove_flags)
+
+
+async def move_message(
+    encrypted_credentials: str,
+    imap_host: str,
+    imap_port: int,
+    imap_ssl: bool,
+    source_folder: str,
+    uid: int,
+    target_folder: str | None,
+) -> None:
+    creds = decrypt_credentials(encrypted_credentials)
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(
+        _executor,
+        _move_message_sync,
+        imap_host, imap_port, creds["username"], creds["password"], imap_ssl,
+        source_folder, uid, target_folder,
+    )
+
+
+async def _run_flag_update(
+    encrypted_credentials: str,
+    imap_host: str,
+    imap_port: int,
+    imap_ssl: bool,
+    folder_name: str,
+    uid: int,
+    add_flags: list[bytes] | None,
+    remove_flags: list[bytes] | None,
+) -> None:
+    creds = decrypt_credentials(encrypted_credentials)
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(
+        _executor,
+        _update_flags_sync,
+        imap_host, imap_port, creds["username"], creds["password"], imap_ssl,
+        folder_name, uid, add_flags, remove_flags,
     )
 
 

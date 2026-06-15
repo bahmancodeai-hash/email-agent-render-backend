@@ -133,23 +133,101 @@ async def _get_message(db: AsyncSession, message_id: uuid.UUID, account_ids: lis
     return msg
 
 
-async def _push_gmail_action(account: EmailAccount, msg: Message, action: str, **kwargs) -> None:
-    if account.account_type != AccountType.GMAIL or not msg.remote_id:
+async def _push_remote_action(account: EmailAccount, msg: Message, action: str, **kwargs) -> None:
+    if account.account_type == AccountType.GMAIL and msg.remote_id:
+        from app.services import gmail as gmail_service
+
+        def _run_gmail() -> None:
+            if action == "read":
+                gmail_service.mark_read(account.encrypted_credentials, msg.remote_id, kwargs.get("is_read", True))
+            elif action == "flag":
+                gmail_service.set_starred(account.encrypted_credentials, msg.remote_id, kwargs.get("is_flagged", True))
+            elif action == "archive":
+                gmail_service.archive_message(account.encrypted_credentials, msg.remote_id)
+            elif action == "delete":
+                gmail_service.trash_message(account.encrypted_credentials, msg.remote_id)
+
+        await asyncio.to_thread(_run_gmail)
         return
 
-    from app.services import gmail as gmail_service
+    if account.account_type == AccountType.OUTLOOK and msg.remote_id:
+        from app.services import outlook as outlook_service
 
-    def _run() -> None:
+        def _run_outlook() -> str | None:
+            if action == "read":
+                outlook_service.mark_read(account.encrypted_credentials, msg.remote_id, kwargs.get("is_read", True))
+            elif action == "flag":
+                outlook_service.set_flagged(account.encrypted_credentials, msg.remote_id, kwargs.get("is_flagged", True))
+            elif action == "archive" and kwargs.get("target_folder_remote_name"):
+                return outlook_service.move_message(
+                    account.encrypted_credentials,
+                    msg.remote_id,
+                    kwargs["target_folder_remote_name"],
+                )
+            elif action == "delete":
+                outlook_service.delete_message(account.encrypted_credentials, msg.remote_id)
+            return None
+
+        new_remote_id = await asyncio.to_thread(_run_outlook)
+        if new_remote_id:
+            msg.remote_id = new_remote_id
+        return
+
+    if account.account_type == AccountType.IMAP and msg.uid:
+        source_folder = kwargs.get("source_folder_remote_name")
+        if not source_folder:
+            return
+        from app.services import imap as imap_service
+
         if action == "read":
-            gmail_service.mark_read(account.encrypted_credentials, msg.remote_id, kwargs.get("is_read", True))
+            await imap_service.mark_read(
+                account.encrypted_credentials,
+                account.imap_host,
+                account.imap_port,
+                account.imap_ssl,
+                source_folder,
+                msg.uid,
+                kwargs.get("is_read", True),
+            )
         elif action == "flag":
-            gmail_service.set_starred(account.encrypted_credentials, msg.remote_id, kwargs.get("is_flagged", True))
+            await imap_service.set_flagged(
+                account.encrypted_credentials,
+                account.imap_host,
+                account.imap_port,
+                account.imap_ssl,
+                source_folder,
+                msg.uid,
+                kwargs.get("is_flagged", True),
+            )
         elif action == "archive":
-            gmail_service.archive_message(account.encrypted_credentials, msg.remote_id)
+            target_folder = kwargs.get("target_folder_remote_name")
+            if not target_folder:
+                return
+            await imap_service.move_message(
+                account.encrypted_credentials,
+                account.imap_host,
+                account.imap_port,
+                account.imap_ssl,
+                source_folder,
+                msg.uid,
+                target_folder,
+            )
         elif action == "delete":
-            gmail_service.trash_message(account.encrypted_credentials, msg.remote_id)
+            await imap_service.move_message(
+                account.encrypted_credentials,
+                account.imap_host,
+                account.imap_port,
+                account.imap_ssl,
+                source_folder,
+                msg.uid,
+                kwargs.get("target_folder_remote_name"),
+            )
 
-    await asyncio.to_thread(_run)
+
+async def _get_message_folder(db: AsyncSession, msg: Message) -> Folder | None:
+    if not msg.folder_id:
+        return None
+    return await db.get(Folder, msg.folder_id)
 
 
 async def _refresh_counts(db: AsyncSession, account_id: uuid.UUID) -> None:
@@ -557,7 +635,14 @@ async def get_email(
     msg = await _get_message(db, message_id, account_ids)
     if not msg.is_read:
         account = await _get_account(db, msg.account_id, current_user.id)
-        await _push_gmail_action(account, msg, "read", is_read=True)
+        source_folder = await _get_message_folder(db, msg)
+        await _push_remote_action(
+            account,
+            msg,
+            "read",
+            is_read=True,
+            source_folder_remote_name=source_folder.remote_name if source_folder else None,
+        )
         msg.is_read = True
         msg.status = MessageStatus.READ
         await _refresh_counts(db, msg.account_id)
@@ -800,7 +885,14 @@ async def mark_read(
     account_ids = await _get_user_account_ids(db, current_user.id)
     msg = await _get_message(db, message_id, account_ids)
     account = await _get_account(db, msg.account_id, current_user.id)
-    await _push_gmail_action(account, msg, "read", is_read=is_read)
+    source_folder = await _get_message_folder(db, msg)
+    await _push_remote_action(
+        account,
+        msg,
+        "read",
+        is_read=is_read,
+        source_folder_remote_name=source_folder.remote_name if source_folder else None,
+    )
     msg.is_read = is_read
     msg.status = MessageStatus.READ if is_read else MessageStatus.UNREAD
     await _refresh_counts(db, msg.account_id)
@@ -817,7 +909,14 @@ async def toggle_flag(
     account_ids = await _get_user_account_ids(db, current_user.id)
     msg = await _get_message(db, message_id, account_ids)
     account = await _get_account(db, msg.account_id, current_user.id)
-    await _push_gmail_action(account, msg, "flag", is_flagged=is_flagged)
+    source_folder = await _get_message_folder(db, msg)
+    await _push_remote_action(
+        account,
+        msg,
+        "flag",
+        is_flagged=is_flagged,
+        source_folder_remote_name=source_folder.remote_name if source_folder else None,
+    )
     msg.is_flagged = is_flagged
     await _refresh_counts(db, msg.account_id)
     return {"updated": True}
@@ -832,7 +931,7 @@ async def archive_email(
     account_ids = await _get_user_account_ids(db, current_user.id)
     msg = await _get_message(db, message_id, account_ids)
     account = await _get_account(db, msg.account_id, current_user.id)
-    await _push_gmail_action(account, msg, "archive")
+    source_folder = await _get_message_folder(db, msg)
 
     result = await db.execute(
         select(Folder).where(
@@ -841,6 +940,13 @@ async def archive_email(
         )
     )
     archive_folder = result.scalar_one_or_none()
+    await _push_remote_action(
+        account,
+        msg,
+        "archive",
+        source_folder_remote_name=source_folder.remote_name if source_folder else None,
+        target_folder_remote_name=archive_folder.remote_name if archive_folder else None,
+    )
     if archive_folder:
         msg.folder_id = archive_folder.id
     msg.is_read = True
@@ -893,7 +999,23 @@ async def delete_email(
     account_ids = await _get_user_account_ids(db, current_user.id)
     msg = await _get_message(db, message_id, account_ids)
     account = await _get_account(db, msg.account_id, current_user.id)
-    await _push_gmail_action(account, msg, "delete")
+    source_folder = await _get_message_folder(db, msg)
+    result = await db.execute(
+        select(Folder).where(
+            Folder.account_id == msg.account_id,
+            Folder.folder_type == "trash",
+        )
+    )
+    trash_folder = result.scalar_one_or_none()
+    await _push_remote_action(
+        account,
+        msg,
+        "delete",
+        source_folder_remote_name=source_folder.remote_name if source_folder else None,
+        target_folder_remote_name=trash_folder.remote_name if trash_folder else None,
+    )
+    if trash_folder:
+        msg.folder_id = trash_folder.id
     msg.is_deleted = True
     msg.status = MessageStatus.DELETED
     await _refresh_counts(db, msg.account_id)
