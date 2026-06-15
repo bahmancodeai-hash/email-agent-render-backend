@@ -1,4 +1,5 @@
 import uuid
+import logging
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,6 +24,7 @@ from app.services import outlook as outlook_service
 from app.config import settings
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class ImapAccountCreate(BaseModel):
@@ -62,6 +64,17 @@ class AccountUpdate(BaseModel):
 
 class AccountReorderRequest(BaseModel):
     account_ids: list[uuid.UUID]
+
+
+class OAuthProviderStatus(BaseModel):
+    configured: bool
+    redirect_uri: str
+    missing: list[str]
+
+
+class OAuthStatusOut(BaseModel):
+    gmail: OAuthProviderStatus
+    outlook: OAuthProviderStatus
 
 
 def _serialize_account(account: EmailAccount) -> dict:
@@ -111,6 +124,69 @@ def _oauth_success_page(provider: str, email: str) -> HTMLResponse:
     </main>
   </body>
 </html>"""
+    )
+
+
+def _oauth_error_page(provider: str, message: str) -> HTMLResponse:
+    return HTMLResponse(
+        f"""<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Email Agent</title>
+    <style>
+      body {{ font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:#f6f7f9; color:#111827; margin:0; display:grid; place-items:center; min-height:100vh; }}
+      main {{ background:white; border:1px solid #fecaca; border-radius:12px; padding:28px; width:min(520px, calc(100vw - 32px)); box-shadow:0 18px 60px rgba(15,23,42,.12); }}
+      h1 {{ margin:0 0 8px; font-size:20px; }}
+      p {{ margin:8px 0; color:#4b5563; line-height:1.5; }}
+      .bad {{ width:36px; height:36px; border-radius:50%; background:#dc2626; color:white; display:grid; place-items:center; font-weight:700; margin-bottom:14px; }}
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="bad">!</div>
+      <h1>{provider} не подключен</h1>
+      <p>{message}</p>
+      <p>Закрой это окно, вернись в Email Agent и попробуй снова после исправления настроек.</p>
+    </main>
+  </body>
+</html>""",
+        status_code=400,
+    )
+
+
+def _provider_status(provider: str) -> OAuthProviderStatus:
+    if provider == "gmail":
+        checks = {
+            "GMAIL_CLIENT_ID": settings.gmail_client_id,
+            "GMAIL_CLIENT_SECRET": settings.gmail_client_secret,
+            "GMAIL_REDIRECT_URI": settings.gmail_redirect_uri,
+        }
+        redirect_uri = settings.gmail_redirect_uri
+    else:
+        checks = {
+            "OUTLOOK_CLIENT_ID": settings.outlook_client_id,
+            "OUTLOOK_CLIENT_SECRET": settings.outlook_client_secret,
+            "OUTLOOK_REDIRECT_URI": settings.outlook_redirect_uri,
+        }
+        redirect_uri = settings.outlook_redirect_uri
+    missing = [key for key, value in checks.items() if not value]
+    return OAuthProviderStatus(configured=not missing, redirect_uri=redirect_uri, missing=missing)
+
+
+def _require_oauth_provider(provider: str) -> None:
+    status = _provider_status(provider)
+    if status.configured:
+        return
+    name = "Gmail" if provider == "gmail" else "Outlook"
+    raise HTTPException(
+        status_code=503,
+        detail={
+            "code": f"{provider}_oauth_not_configured",
+            "message": f"{name} OAuth is not configured on the backend.",
+            "missing": status.missing,
+            "redirect_uri": status.redirect_uri,
+        },
     )
 
 
@@ -264,10 +340,16 @@ async def get_account_folders(
 
 # ── Gmail OAuth ───────────────────────────────────────────────────────────────
 
+@router.get("/oauth/status", response_model=OAuthStatusOut)
+async def oauth_status(current_user: User = Depends(get_current_user)):
+    return OAuthStatusOut(
+        gmail=_provider_status("gmail"),
+        outlook=_provider_status("outlook"),
+    )
+
 @router.get("/gmail/auth-url")
 async def gmail_auth_url(current_user: User = Depends(get_current_user)):
-    if not settings.gmail_client_id:
-        raise HTTPException(status_code=400, detail="Gmail OAuth not configured")
+    _require_oauth_provider("gmail")
     return {"auth_url": gmail_service.get_auth_url(create_oauth_state("gmail", current_user.id))}
 
 
@@ -305,16 +387,16 @@ async def gmail_callback(code: str, state: str, db: AsyncSession = Depends(get_d
         await db.flush()
         await _sort_accounts_az(db, user_id)
         return _oauth_success_page("Gmail", email_address)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Gmail OAuth error")
+    except Exception as exc:
+        logger.exception("Gmail OAuth callback failed")
+        return _oauth_error_page("Gmail", str(exc)[:500] or "OAuth callback failed.")
 
 
 # ── Outlook OAuth ─────────────────────────────────────────────────────────────
 
 @router.get("/outlook/auth-url")
 async def outlook_auth_url(current_user: User = Depends(get_current_user)):
-    if not settings.outlook_client_id:
-        raise HTTPException(status_code=400, detail="Outlook OAuth not configured")
+    _require_oauth_provider("outlook")
     return {"auth_url": outlook_service.get_auth_url(create_oauth_state("outlook", current_user.id))}
 
 
@@ -352,5 +434,6 @@ async def outlook_callback(code: str, state: str, db: AsyncSession = Depends(get
         await db.flush()
         await _sort_accounts_az(db, user_id)
         return _oauth_success_page("Outlook", email_address)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Outlook OAuth error")
+    except Exception as exc:
+        logger.exception("Outlook OAuth callback failed")
+        return _oauth_error_page("Outlook", str(exc)[:500] or "OAuth callback failed.")
