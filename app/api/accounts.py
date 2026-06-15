@@ -1,6 +1,7 @@
 import uuid
 import logging
-from fastapi import APIRouter, Depends, HTTPException
+from html import escape
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -101,6 +102,8 @@ async def _sort_accounts_az(db: AsyncSession, user_id: uuid.UUID) -> None:
 
 
 def _oauth_success_page(provider: str, email: str) -> HTMLResponse:
+    safe_provider = escape(provider)
+    safe_email = escape(email)
     return HTMLResponse(
         f"""<!doctype html>
 <html>
@@ -112,15 +115,33 @@ def _oauth_success_page(provider: str, email: str) -> HTMLResponse:
       main {{ background:white; border:1px solid #e5e7eb; border-radius:12px; padding:28px; width:min(460px, calc(100vw - 32px)); box-shadow:0 18px 60px rgba(15,23,42,.12); }}
       h1 {{ margin:0 0 8px; font-size:20px; }}
       p {{ margin:8px 0; color:#4b5563; line-height:1.5; }}
+      .hint {{ font-size:13px; color:#6b7280; }}
       .ok {{ width:36px; height:36px; border-radius:50%; background:#16a34a; color:white; display:grid; place-items:center; font-weight:700; margin-bottom:14px; }}
     </style>
+    <script>
+      let seconds = 3;
+      function tick() {{
+        const node = document.getElementById("countdown");
+        if (node) node.textContent = String(seconds);
+        if (seconds <= 0) {{
+          window.close();
+          document.body.classList.add("closing");
+        }}
+        seconds -= 1;
+      }}
+      window.addEventListener("load", () => {{
+        tick();
+        window.setInterval(tick, 1000);
+      }});
+    </script>
   </head>
   <body>
     <main>
       <div class="ok">✓</div>
-      <h1>{provider} подключен</h1>
-      <p>{email}</p>
-      <p>Можно закрыть это окно и вернуться в Email Agent. Аккаунт обновится после синхронизации списка.</p>
+      <h1>{safe_provider} подключен</h1>
+      <p>{safe_email}</p>
+      <p>Возвращаюсь в Email Agent. Аккаунт откроется в Inbox автоматически.</p>
+      <p class="hint">Это окно закроется через <span id="countdown">3</span> сек.</p>
     </main>
   </body>
 </html>"""
@@ -354,7 +375,12 @@ async def gmail_auth_url(current_user: User = Depends(get_current_user)):
 
 
 @router.get("/gmail/callback")
-async def gmail_callback(code: str, state: str, db: AsyncSession = Depends(get_db)):
+async def gmail_callback(
+    code: str,
+    state: str,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
     try:
         user_id = decode_oauth_state(state, "gmail")
         creds_dict = gmail_service.exchange_code(code)
@@ -386,6 +412,9 @@ async def gmail_callback(code: str, state: str, db: AsyncSession = Depends(get_d
             db.add(account)
         await db.flush()
         await _sort_accounts_az(db, user_id)
+        await db.commit()
+        from app.tasks.sync_tasks import sync_account_now
+        background_tasks.add_task(sync_account_now, str(account.id))
         return _oauth_success_page("Gmail", email_address)
     except Exception as exc:
         logger.exception("Gmail OAuth callback failed")

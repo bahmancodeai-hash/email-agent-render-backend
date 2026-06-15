@@ -39,6 +39,7 @@ def sync_account_now(account_id: str, *, raise_on_error: bool = False) -> dict[s
         elif account.account_type == AccountType.OUTLOOK:
             _sync_outlook(db, account)
 
+        _refresh_account_counts(db, account)
         account.last_sync_at = datetime.utcnow()
         account.status = AccountStatus.ACTIVE
         account.error_message = None
@@ -83,6 +84,18 @@ def _is_auth_error(exc: Exception) -> bool:
         "401",
     )
     return "loginerror" in name or any(marker in message for marker in auth_markers)
+
+
+def _refresh_account_counts(db: Session, account) -> None:
+    from app.models.message import Message
+
+    visible_messages = db.query(Message).filter(
+        Message.account_id == account.id,
+        Message.is_deleted == False,
+        Message.is_draft == False,
+    )
+    account.total_messages = visible_messages.count()
+    account.unread_count = visible_messages.filter(Message.is_read == False).count()
 
 
 def _sync_imap(db: Session, account):
