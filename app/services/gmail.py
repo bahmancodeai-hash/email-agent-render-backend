@@ -8,6 +8,7 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 from app.config import settings
 from app.services.crypto import decrypt_credentials, encrypt_credentials
@@ -173,8 +174,11 @@ def get_message_state(encrypted_credentials: str, remote_id: str) -> dict | None
         msg_data = service.users().messages().get(
             userId="me", id=remote_id, format="metadata", metadataHeaders=["Message-ID"]
         ).execute()
-    except Exception:
-        return None
+    except HttpError as exc:
+        status = getattr(getattr(exc, "resp", None), "status", None)
+        if status in {404, 410}:
+            return None
+        raise
     labels = msg_data.get("labelIds", [])
     return {
         "remote_id": msg_data.get("id"),

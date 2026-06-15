@@ -19,6 +19,7 @@ SYNC_FOLDER_TYPES = {"inbox", "sent", "drafts", "trash", "spam", "archive"}
 GMAIL_SYNC_FOLDER_TYPES = SYNC_FOLDER_TYPES - {"archive"}
 GMAIL_FETCH_LIMIT = 150
 GMAIL_RECONCILE_LIMIT = 1000
+GMAIL_STALE_STATE_LIMIT = 200
 
 _FOLDER_PRIORITY = {
     "inbox": ["inbox"],
@@ -247,16 +248,68 @@ def _reconcile_gmail_folder(db: Session, Message, MessageStatus, account, folder
     if len(present_remote_ids) >= GMAIL_RECONCILE_LIMIT:
         return
 
+    from app.models.folder import Folder
+    from app.services import gmail as gmail_service
+
     stale = db.query(Message).filter(
         Message.account_id == account.id,
         Message.folder_id == folder.id,
         Message.remote_id != None,
         Message.is_draft == False,
         Message.remote_id.notin_(present_remote_ids),
-    ).all()
+    ).limit(GMAIL_STALE_STATE_LIMIT).all()
     for msg in stale:
-        msg.is_deleted = True
-        msg.status = MessageStatus.DELETED
+        state = gmail_service.get_message_state(account.encrypted_credentials, msg.remote_id)
+        if not state:
+            msg.is_deleted = True
+            msg.status = MessageStatus.DELETED
+            continue
+
+        labels = set(state.get("labels") or [])
+        if "TRASH" in labels:
+            target_type = "trash"
+        elif "SPAM" in labels:
+            target_type = "spam"
+        elif "DRAFT" in labels:
+            target_type = "drafts"
+        elif "SENT" in labels:
+            target_type = "sent"
+        elif "INBOX" in labels:
+            target_type = "inbox"
+        else:
+            target_type = "archive"
+
+        target_folder = _get_or_create_folder(db, Folder, account, target_type)
+        msg.folder_id = target_folder.id
+        msg.is_read = bool(state.get("is_read", True))
+        msg.is_flagged = bool(state.get("is_flagged", False))
+        msg.is_draft = target_type == "drafts"
+        msg.is_spam = target_type == "spam"
+        msg.is_deleted = target_type == "trash"
+        msg.status = (
+            MessageStatus.DELETED
+            if msg.is_deleted
+            else MessageStatus.READ if msg.is_read else MessageStatus.UNREAD
+        )
+
+
+def _get_or_create_folder(db: Session, Folder, account, folder_type: str):
+    folder = db.query(Folder).filter(
+        Folder.account_id == account.id,
+        Folder.folder_type == folder_type,
+    ).first()
+    if folder:
+        return folder
+
+    folder = Folder(
+        account_id=account.id,
+        name=folder_type.title(),
+        remote_name=folder_type,
+        folder_type=folder_type,
+    )
+    db.add(folder)
+    db.flush()
+    return folder
 
 
 def _sync_imap(db: Session, account):

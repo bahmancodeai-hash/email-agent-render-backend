@@ -216,6 +216,9 @@ def _serialize(m: Message) -> dict:
 
 
 def _list_dedupe_key(m: Message) -> tuple:
+    remote_id = (getattr(m, "remote_id", None) or "").strip()
+    if remote_id:
+        return (str(m.account_id), "remote", remote_id)
     return (
         str(m.account_id),
         (m.subject or "").strip().lower(),
@@ -225,7 +228,7 @@ def _list_dedupe_key(m: Message) -> tuple:
     )
 
 
-def _dedupe_message_list(messages: list[Message], limit: int) -> list[Message]:
+def _dedupe_message_list(messages: list[Message], limit: int, offset: int = 0) -> list[Message]:
     seen = set()
     result = []
     for message in messages:
@@ -234,9 +237,9 @@ def _dedupe_message_list(messages: list[Message], limit: int) -> list[Message]:
             continue
         seen.add(key)
         result.append(message)
-        if len(result) >= limit:
+        if len(result) >= offset + limit:
             break
-    return result
+    return result[offset:offset + limit]
 
 
 def _email_only(value: str | None) -> str:
@@ -418,8 +421,8 @@ def _context_summary(current: Message, related: list[Message], similar: list[Mes
 async def smart_folder(
     folder_name: str,
     account_id: uuid.UUID | None = Query(None),
-    limit: int = Query(50, le=200),
-    offset: int = Query(0),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -465,9 +468,11 @@ async def smart_folder(
     else:
         raise HTTPException(status_code=404, detail=f"Unknown smart folder: {folder_name}")
 
-    q = q.order_by(Message.received_at.desc()).offset(offset).limit(limit)
+    query_limit = offset + (limit * 3)
+    q = q.order_by(Message.received_at.desc()).limit(query_limit)
     result = await db.execute(q)
     messages = result.scalars().all()
+    messages = _dedupe_message_list(messages, limit, offset)
     return [_serialize(m) for m in messages]
 
 
@@ -481,8 +486,8 @@ async def list_emails(
     is_unread: bool | None = Query(None),
     is_flagged: bool | None = Query(None),
     search: str | None = Query(None),
-    limit: int = Query(50, le=200),
-    offset: int = Query(0),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -535,9 +540,11 @@ async def list_emails(
             )
         )
 
-    q = q.order_by(Message.received_at.desc()).offset(offset).limit(limit)
+    query_limit = offset + (limit * 3)
+    q = q.order_by(Message.received_at.desc()).limit(query_limit)
     result = await db.execute(q)
-    return [_serialize(m) for m in result.scalars().all()]
+    messages = _dedupe_message_list(result.scalars().all(), limit, offset)
+    return [_serialize(m) for m in messages]
 
 
 @router.get("/{message_id}", response_model=MessageDetail)

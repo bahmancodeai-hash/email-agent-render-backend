@@ -127,6 +127,7 @@ def _parse_message(m: dict) -> dict:
         received = datetime.fromisoformat(received.replace("Z", "+00:00"))
 
     return {
+        "remote_id": m.get("id"),
         "message_id": m.get("internetMessageId", m["id"]),
         "thread_id": m.get("conversationId"),
         "subject": m.get("subject", ""),
