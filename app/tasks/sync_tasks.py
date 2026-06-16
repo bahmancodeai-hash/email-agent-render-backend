@@ -219,6 +219,7 @@ def _is_auth_error(exc: Exception) -> bool:
 def _refresh_account_counts(db: Session, account) -> None:
     from app.models.folder import Folder
     from app.models.message import Message
+    from app.models.email_account import AccountType
 
     visible_messages = db.query(Message).filter(
         Message.account_id == account.id,
@@ -226,7 +227,6 @@ def _refresh_account_counts(db: Session, account) -> None:
         Message.is_draft == False,
     )
     account.total_messages = visible_messages.count()
-    account.unread_count = visible_messages.filter(Message.is_read == False).count()
 
     for folder in db.query(Folder).filter(Folder.account_id == account.id).all():
         q = db.query(Message).filter(
@@ -242,6 +242,57 @@ def _refresh_account_counts(db: Session, account) -> None:
             )
         folder.total_messages = q.count()
         folder.unread_count = q.filter(Message.is_read == False).count()
+
+    if account.account_type == AccountType.GMAIL:
+        _refresh_gmail_remote_counts(db, account, Folder, Message)
+
+    inbox = db.query(Folder).filter(
+        Folder.account_id == account.id,
+        Folder.folder_type == "inbox",
+    ).first()
+    account.unread_count = inbox.unread_count if inbox else visible_messages.filter(Message.is_read == False).count()
+
+
+def _refresh_gmail_remote_counts(db: Session, account, Folder, Message) -> None:
+    from app.models.message import MessageStatus
+    from app.services import gmail as gmail_service
+
+    for folder_type in ("inbox", "sent", "drafts", "spam", "trash"):
+        folder = db.query(Folder).filter(
+            Folder.account_id == account.id,
+            Folder.folder_type == folder_type,
+        ).first()
+        if not folder:
+            continue
+        try:
+            stats = gmail_service.get_label_stats(account.encrypted_credentials, folder_type)
+            unread_ids = (
+                set(gmail_service.list_unread_message_ids(
+                    account.encrypted_credentials,
+                    folder_type,
+                    max_results=min(stats["unread_count"], GMAIL_RECONCILE_LIMIT),
+                ))
+                if stats["unread_count"] > 0
+                else set()
+            )
+        except Exception as exc:
+            logger.debug("Gmail label stats refresh failed for %s/%s: %s", account.id, folder_type, exc)
+            continue
+
+        folder.total_messages = stats["total_messages"]
+        folder.unread_count = stats["unread_count"]
+
+        if stats["unread_count"] <= GMAIL_RECONCILE_LIMIT:
+            local_messages = db.query(Message).filter(
+                Message.account_id == account.id,
+                Message.folder_id == folder.id,
+                Message.remote_id != None,
+            ).all()
+            for msg in local_messages:
+                is_unread = msg.remote_id in unread_ids
+                msg.is_read = not is_unread
+                if not msg.is_deleted and not msg.is_draft:
+                    msg.status = MessageStatus.UNREAD if is_unread else MessageStatus.READ
 
 
 def _reconcile_gmail_folder(db: Session, Message, MessageStatus, account, folder, present_remote_ids: set[str]) -> None:

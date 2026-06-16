@@ -244,10 +244,9 @@ async def _refresh_counts(db: AsyncSession, account_id: uuid.UUID) -> None:
             Message.is_draft == False,
         )
     )
-    unread = visible.where(Message.is_read == False)
     account.total_messages = await db.scalar(visible) or 0
-    account.unread_count = await db.scalar(unread) or 0
 
+    inbox_unread_count: int | None = None
     result = await db.execute(select(Folder).where(Folder.account_id == account_id))
     for folder in result.scalars().all():
         folder_visible = (
@@ -268,6 +267,13 @@ async def _refresh_counts(db: AsyncSession, account_id: uuid.UUID) -> None:
             )
         folder.total_messages = await db.scalar(folder_visible) or 0
         folder.unread_count = await db.scalar(folder_visible.where(Message.is_read == False)) or 0
+        if folder.folder_type == "inbox":
+            inbox_unread_count = folder.unread_count
+
+    if inbox_unread_count is not None:
+        account.unread_count = inbox_unread_count
+    else:
+        account.unread_count = await db.scalar(visible.where(Message.is_read == False)) or 0
 
 
 def _serialize(m: Message) -> dict:

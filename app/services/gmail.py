@@ -142,6 +142,38 @@ def list_message_ids(encrypted_credentials: str, folder: str = "INBOX", max_resu
     return ids
 
 
+def list_unread_message_ids(encrypted_credentials: str, folder: str = "INBOX", max_results: int = 1000) -> list[str]:
+    service, _ = _build_service(encrypted_credentials)
+    label_id = _folder_to_label(folder)
+    ids: list[str] = []
+    page_token = None
+    while len(ids) < max_results:
+        request_limit = min(500, max_results - len(ids))
+        result = service.users().messages().list(
+            userId="me",
+            labelIds=[label_id],
+            q="is:unread",
+            maxResults=request_limit,
+            pageToken=page_token,
+            fields="messages/id,nextPageToken",
+        ).execute()
+        ids.extend(item["id"] for item in result.get("messages", []) if item.get("id"))
+        page_token = result.get("nextPageToken")
+        if not page_token:
+            break
+    return ids
+
+
+def get_label_stats(encrypted_credentials: str, folder: str = "INBOX") -> dict:
+    service, _ = _build_service(encrypted_credentials)
+    label_id = _folder_to_label(folder)
+    result = service.users().labels().get(userId="me", id=label_id).execute()
+    return {
+        "total_messages": int(result.get("messagesTotal") or 0),
+        "unread_count": int(result.get("messagesUnread") or 0),
+    }
+
+
 def mark_read(encrypted_credentials: str, remote_id: str, is_read: bool = True) -> None:
     service, _ = _build_service(encrypted_credentials)
     body = {"removeLabelIds": ["UNREAD"]} if is_read else {"addLabelIds": ["UNREAD"]}
