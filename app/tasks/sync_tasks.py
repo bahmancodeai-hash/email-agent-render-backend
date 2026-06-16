@@ -245,12 +245,44 @@ def _refresh_account_counts(db: Session, account) -> None:
 
     if account.account_type == AccountType.GMAIL:
         _refresh_gmail_remote_counts(db, account, Folder, Message)
+    elif account.account_type == AccountType.IMAP:
+        _refresh_imap_remote_counts(db, account, Folder)
 
     inbox = db.query(Folder).filter(
         Folder.account_id == account.id,
         Folder.folder_type == "inbox",
     ).first()
     account.unread_count = inbox.unread_count if inbox else visible_messages.filter(Message.is_read == False).count()
+
+
+def _refresh_imap_remote_counts(db: Session, account, Folder) -> None:
+    from app.services import imap as imap_service
+
+    loop = asyncio.new_event_loop()
+    try:
+        folders = loop.run_until_complete(
+            imap_service.fetch_folders(
+                account.encrypted_credentials,
+                account.imap_host,
+                account.imap_port,
+                account.imap_ssl,
+            )
+        )
+    except Exception as exc:
+        logger.debug("IMAP folder stats refresh failed for %s: %s", account.id, exc)
+        return
+    finally:
+        loop.close()
+
+    for remote_folder in folders:
+        folder = db.query(Folder).filter(
+            Folder.account_id == account.id,
+            Folder.remote_name == remote_folder["remote_name"],
+        ).first()
+        if not folder:
+            continue
+        folder.total_messages = int(remote_folder.get("total_messages") or folder.total_messages or 0)
+        folder.unread_count = int(remote_folder.get("unread_count") or 0)
 
 
 def _refresh_gmail_remote_counts(db: Session, account, Folder, Message) -> None:
@@ -385,12 +417,19 @@ def _sync_imap(db: Session, account):
                 Folder.account_id == account.id,
                 Folder.remote_name == f["remote_name"],
             ).first()
-            if not existing:
+            if existing:
+                existing.name = f["name"]
+                existing.folder_type = f["folder_type"]
+                existing.total_messages = f.get("total_messages", existing.total_messages)
+                existing.unread_count = f.get("unread_count", existing.unread_count)
+            else:
                 db.add(Folder(
                     account_id=account.id,
                     name=f["name"],
                     remote_name=f["remote_name"],
                     folder_type=f["folder_type"],
+                    total_messages=f.get("total_messages", 0),
+                    unread_count=f.get("unread_count", 0),
                 ))
         db.flush()
 

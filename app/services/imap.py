@@ -25,11 +25,21 @@ def _fetch_folders_sync(host: str, port: int, username: str, password: str, ssl:
         folders = []
         for flags, delimiter, name in client.list_folders():
             folder_type = _detect_folder_type(flags, name)
+            total_messages = 0
+            unread_count = 0
+            try:
+                status = client.folder_status(name, [b"MESSAGES", b"UNSEEN"])
+                total_messages = int(status.get(b"MESSAGES") or status.get("MESSAGES") or 0)
+                unread_count = int(status.get(b"UNSEEN") or status.get("UNSEEN") or 0)
+            except Exception:
+                pass
             folders.append({
                 "remote_name": name,
                 "name": name.split(delimiter.decode() if delimiter else "/")[-1] if delimiter else name,
                 "folder_type": folder_type,
                 "flags": [str(f) for f in flags],
+                "total_messages": total_messages,
+                "unread_count": unread_count,
             })
         return folders
     finally:
