@@ -78,7 +78,7 @@ class OAuthStatusOut(BaseModel):
     outlook: OAuthProviderStatus
 
 
-def _serialize_account(account: EmailAccount) -> dict:
+def _serialize_account(account: EmailAccount, inbox_unread_count: int | None = None) -> dict:
     return {
         "id": str(account.id),
         "account_type": account.account_type.value if hasattr(account.account_type, "value") else account.account_type,
@@ -86,7 +86,7 @@ def _serialize_account(account: EmailAccount) -> dict:
         "display_name": account.display_name,
         "status": account.status.value if hasattr(account.status, "value") else account.status,
         "last_sync_at": account.last_sync_at.isoformat() if account.last_sync_at else None,
-        "unread_count": account.unread_count,
+        "unread_count": inbox_unread_count if inbox_unread_count is not None else account.unread_count,
         "group_tag": account.group_tag,
     }
 
@@ -221,7 +221,18 @@ async def list_accounts(
         .where(EmailAccount.user_id == current_user.id, EmailAccount.is_active == True)
         .order_by(EmailAccount.sort_order, EmailAccount.email_address)
     )
-    return [_serialize_account(account) for account in result.scalars().all()]
+    accounts = result.scalars().all()
+    if not accounts:
+        return []
+
+    inbox_counts_result = await db.execute(
+        select(Folder.account_id, Folder.unread_count).where(
+            Folder.account_id.in_([account.id for account in accounts]),
+            Folder.folder_type == "inbox",
+        )
+    )
+    inbox_counts = {account_id: unread_count for account_id, unread_count in inbox_counts_result.all()}
+    return [_serialize_account(account, inbox_counts.get(account.id)) for account in accounts]
 
 
 @router.post("/reorder")
