@@ -32,6 +32,36 @@ _FOLDER_PRIORITY = {
     "archive": ["archive", "all mail"],
 }
 
+
+def _imap_skip_entries() -> set[tuple[str, str, int]]:
+    entries: set[tuple[str, str, int]] = set()
+    raw = settings.imap_skip_uids or ""
+    for item in raw.split(","):
+        parts = [part.strip() for part in item.split("|")]
+        if len(parts) != 3:
+            continue
+        email, folder, uid = parts
+        try:
+            entries.add((email.lower(), folder.lower(), int(uid)))
+        except ValueError:
+            continue
+    return entries
+
+
+def _should_skip_imap_message(skip_entries: set[tuple[str, str, int]], account, folder, message: dict[str, Any]) -> bool:
+    uid = message.get("uid")
+    if uid is None:
+        return False
+    try:
+        uid_value = int(uid)
+    except (TypeError, ValueError):
+        return False
+    return (
+        account.email_address.lower(),
+        (folder.remote_name or folder.name or "").lower(),
+        uid_value,
+    ) in skip_entries
+
 _GMAIL_FOLDER_PRIORITY = {
     "sent": ["[gmail]/sent mail", "sent mail", "sent"],
     "drafts": ["[gmail]/drafts", "drafts"],
@@ -493,6 +523,7 @@ def _sync_imap(db: Session, account):
             EmailRule.user_id == account.user_id,
             EmailRule.is_active == True,
         ).order_by(EmailRule.sort_order).all()
+        skip_entries = _imap_skip_entries()
 
         for folder in sync_folders:
             max_uid = db.query(Message.uid).filter(
@@ -514,6 +545,14 @@ def _sync_imap(db: Session, account):
             )
 
             for m in msgs:
+                if _should_skip_imap_message(skip_entries, account, folder, m):
+                    logger.info(
+                        "Skipping quarantined IMAP message account=%s folder=%s uid=%s",
+                        account.email_address,
+                        folder.remote_name,
+                        m.get("uid"),
+                    )
+                    continue
                 m = _normalized_payload(m)
                 existing = _find_existing_message(db, Message, account.id, folder.id, m)
                 if not existing:
