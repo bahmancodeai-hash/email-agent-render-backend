@@ -19,6 +19,8 @@ from app.models.folder import Folder
 
 router = APIRouter()
 MAX_DEDUPE_SCAN = 5000
+ASSISTANT_MODEL_OPTIONS = {"gpt-5.4-mini", "gpt-5.4", "gpt-5.5"}
+DEFAULT_ASSISTANT_MODEL = "gpt-5.4-mini"
 
 
 # ── Schemas ────────────────────────────────────────────────────────────────
@@ -85,6 +87,7 @@ class SnoozeRequest(BaseModel):
 
 class AssistantDraftRequest(BaseModel):
     instruction: str | None = None
+    model: str | None = None
 
 
 class AssistantDraftResponse(BaseModel):
@@ -95,6 +98,7 @@ class AssistantDraftResponse(BaseModel):
     similar_count: int
     style_source_count: int
     safety_note: str
+    model: str | None = None
 
 
 class ContactSuggestion(BaseModel):
@@ -545,12 +549,21 @@ Write only a ready-to-review email reply draft. Do not include analysis. Do not 
 """.strip()
 
 
-async def _generate_llm_draft(prompt: str) -> str | None:
+def _resolve_assistant_model(model: str | None) -> str:
+    candidate = (model or os.getenv("OPENAI_MODEL") or DEFAULT_ASSISTANT_MODEL).strip()
+    if candidate not in ASSISTANT_MODEL_OPTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported assistant model. Allowed: {', '.join(sorted(ASSISTANT_MODEL_OPTIONS))}",
+        )
+    return candidate
+
+
+async def _generate_llm_draft(prompt: str, model: str) -> str | None:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         return None
 
-    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     try:
         async with httpx.AsyncClient(timeout=45) as client:
             response = await client.post(
@@ -936,8 +949,9 @@ async def assistant_reply_draft(
     style_sources = list(style_result.scalars().all())
 
     instruction = (data.instruction or "").strip()
+    model = _resolve_assistant_model(data.model)
     prompt = _build_prompt(current, instruction, related, similar, style_sources)
-    draft = await _generate_llm_draft(prompt)
+    draft = await _generate_llm_draft(prompt, model)
     if not draft:
         draft = _fallback_draft(current, instruction, related, similar)
 
@@ -953,6 +967,7 @@ async def assistant_reply_draft(
         similar_count=len(similar),
         style_source_count=len(style_sources),
         safety_note="Черновик подготовлен только для проверки. Ничего не отправлено автоматически.",
+        model=model,
     )
 
 
