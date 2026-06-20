@@ -47,6 +47,14 @@ class Settings(BaseSettings):
     cpanel_imap_host: str = ""
     cpanel_smtp_host: str = ""
 
+    # Mobile APK self-update metadata
+    mobile_apk_url: str = ""
+    mobile_apk_version: str = "0.2.1"
+    mobile_apk_version_code: int = 3
+    mobile_release_label: str = "2026.06.21-02 APKUpdater"
+    mobile_release_notes: str = "Mobile folders, accounts, AI draft assistant, hosting mailboxes, account deletion, in-app APK updater"
+    mobile_update_required: bool = False
+
     # MinIO
     minio_endpoint: str = "localhost:9000"
     minio_access_key: str = "minioadmin"
