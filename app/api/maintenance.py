@@ -19,6 +19,12 @@ class DedupeMessagesOut(BaseModel):
     truncated: bool = False
 
 
+class MessageColumnOut(BaseModel):
+    column_name: str
+    data_type: str
+    character_maximum_length: int | None = None
+
+
 def _run_dedupe_messages(apply: bool, batch_size: int, max_batches: int) -> dict:
     with _engine.begin() as conn:
         from sqlalchemy.orm import Session
@@ -35,3 +41,21 @@ async def dedupe_messages(
     current_user: User = Depends(get_current_user),
 ):
     return await run_in_threadpool(_run_dedupe_messages, apply, batch_size, max_batches)
+
+
+def _get_message_columns() -> list[dict]:
+    from sqlalchemy import text
+
+    with _engine.begin() as conn:
+        rows = conn.execute(text("""
+            SELECT column_name, data_type, character_maximum_length
+            FROM information_schema.columns
+            WHERE table_name = 'messages'
+            ORDER BY ordinal_position
+        """)).mappings().all()
+        return [dict(row) for row in rows]
+
+
+@router.get("/message-columns", response_model=list[MessageColumnOut])
+async def message_columns(current_user: User = Depends(get_current_user)):
+    return await run_in_threadpool(_get_message_columns)
