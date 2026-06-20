@@ -39,6 +39,14 @@ class Settings(BaseSettings):
     outlook_redirect_uri: str = "http://localhost:8000/api/v1/accounts/outlook/callback"
     outlook_tenant: str = "common"
 
+    # cPanel / Namecheap hosting email integration
+    cpanel_base_url: str = ""
+    cpanel_username: str = ""
+    cpanel_api_token: str = ""
+    cpanel_domains: str = "edumail.az,smartapply.az"
+    cpanel_imap_host: str = ""
+    cpanel_smtp_host: str = ""
+
     # MinIO
     minio_endpoint: str = "localhost:9000"
     minio_access_key: str = "minioadmin"
