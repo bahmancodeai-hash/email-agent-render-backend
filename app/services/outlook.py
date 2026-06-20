@@ -117,7 +117,13 @@ def list_messages(encrypted_credentials: str, folder_id: str = "inbox", limit: i
         timeout=20,
     )
     resp.raise_for_status()
-    return [_parse_message(m) for m in resp.json().get("value", [])]
+    messages = []
+    for raw in resp.json().get("value", []):
+        attachments = []
+        if raw.get("hasAttachments") and raw.get("id"):
+            attachments = _list_message_attachments(token, raw["id"])
+        messages.append(_parse_message(raw, attachments))
+    return messages
 
 
 def mark_read(encrypted_credentials: str, remote_id: str, is_read: bool = True) -> None:
@@ -165,7 +171,27 @@ def _patch_message(encrypted_credentials: str, remote_id: str, payload: dict) ->
     resp.raise_for_status()
 
 
-def _parse_message(m: dict) -> dict:
+def _list_message_attachments(token: str, message_id: str) -> list[dict]:
+    resp = httpx.get(
+        f"{GRAPH_BASE}/me/messages/{message_id}/attachments",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"$select": "id,name,contentType,size,isInline"},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return [
+        {
+            "attachment_id": item.get("id"),
+            "name": item.get("name") or "attachment",
+            "content_type": item.get("contentType") or "application/octet-stream",
+            "size": int(item.get("size") or 0),
+            "is_inline": bool(item.get("isInline", False)),
+        }
+        for item in resp.json().get("value", [])
+    ]
+
+
+def _parse_message(m: dict, attachments: list[dict] | None = None) -> dict:
     sender = m.get("from", {}).get("emailAddress", {})
     received = m.get("receivedDateTime")
     if received:
@@ -189,7 +215,7 @@ def _parse_message(m: dict) -> dict:
         "is_deleted": False,
         "is_spam": False,
         "received_at": received,
-        "attachments": [],
+        "attachments": attachments or [],
         "uid": None,
     }
 

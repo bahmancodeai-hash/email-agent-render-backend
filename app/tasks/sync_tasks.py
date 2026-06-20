@@ -17,7 +17,9 @@ _engine = create_engine(_sync_url, pool_pre_ping=True, pool_size=10, max_overflo
 _SessionLocal = sessionmaker(bind=_engine)
 SYNC_FOLDER_TYPES = {"inbox", "sent", "drafts", "trash", "spam", "archive"}
 GMAIL_SYNC_FOLDER_TYPES = SYNC_FOLDER_TYPES - {"archive"}
-GMAIL_FETCH_LIMIT = 150
+GMAIL_FETCH_LIMIT = 250
+IMAP_FETCH_LIMIT = 250
+OUTLOOK_FETCH_LIMIT = 250
 GMAIL_RECONCILE_LIMIT = 1000
 GMAIL_STALE_STATE_LIMIT = 200
 
@@ -56,6 +58,9 @@ def _normalized_payload(message: dict[str, Any]) -> dict[str, Any]:
     payload = dict(message)
     payload["message_id"] = _normalize_message_id(payload.get("message_id"))
     payload["remote_id"] = _normalize_message_id(payload.get("remote_id"))
+    payload["in_reply_to"] = _normalize_message_id(payload.get("in_reply_to"))
+    if not payload.get("thread_id"):
+        payload["thread_id"] = payload.get("in_reply_to") or payload.get("message_id")
     return payload
 
 
@@ -162,6 +167,13 @@ def sync_account_now(account_id: str, *, raise_on_error: bool = False) -> dict[s
         if not account or not account.is_active:
             return {"skipped": True, "account_id": account_id}
 
+        acquired = db.execute(
+            text("select pg_try_advisory_xact_lock(hashtext(:lock_name))"),
+            {"lock_name": f"email_agent_sync:{account_id}"},
+        ).scalar()
+        if not acquired:
+            return {"skipped": True, "account_id": account_id, "reason": "sync-in-progress"}
+
         if account.account_type == AccountType.IMAP:
             _sync_imap(db, account)
         elif account.account_type == AccountType.GMAIL:
@@ -247,6 +259,8 @@ def _refresh_account_counts(db: Session, account) -> None:
         _refresh_gmail_remote_counts(db, account, Folder, Message)
     elif account.account_type == AccountType.IMAP:
         _refresh_imap_remote_counts(db, account, Folder)
+    elif account.account_type == AccountType.OUTLOOK:
+        _refresh_outlook_remote_counts(db, account, Folder)
 
     inbox = db.query(Folder).filter(
         Folder.account_id == account.id,
@@ -273,6 +287,26 @@ def _refresh_imap_remote_counts(db: Session, account, Folder) -> None:
         return
     finally:
         loop.close()
+
+    for remote_folder in folders:
+        folder = db.query(Folder).filter(
+            Folder.account_id == account.id,
+            Folder.remote_name == remote_folder["remote_name"],
+        ).first()
+        if not folder:
+            continue
+        folder.total_messages = int(remote_folder.get("total_messages") or folder.total_messages or 0)
+        folder.unread_count = int(remote_folder.get("unread_count") or 0)
+
+
+def _refresh_outlook_remote_counts(db: Session, account, Folder) -> None:
+    from app.services import outlook as outlook_service
+
+    try:
+        folders = outlook_service.list_folders(account.encrypted_credentials)
+    except Exception as exc:
+        logger.debug("Outlook folder stats refresh failed for %s: %s", account.id, exc)
+        return
 
     for remote_folder in folders:
         folder = db.query(Folder).filter(
@@ -459,7 +493,7 @@ def _sync_imap(db: Session, account):
                     account.imap_ssl,
                     folder.remote_name,
                     since_uid=since_uid,
-                    limit=100,
+                    limit=IMAP_FETCH_LIMIT,
                 )
             )
 
@@ -575,7 +609,7 @@ def _sync_outlook(db: Session, account):
         messages = outlook_service.list_messages(
             account.encrypted_credentials,
             folder_id=folder.remote_name,
-            limit=100,
+            limit=OUTLOOK_FETCH_LIMIT,
         )
         for m in messages:
             m = _normalized_payload(m)

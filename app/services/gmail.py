@@ -200,6 +200,37 @@ def trash_message(encrypted_credentials: str, remote_id: str) -> None:
     service.users().messages().trash(userId="me", id=remote_id).execute()
 
 
+def move_message(encrypted_credentials: str, remote_id: str, folder: str) -> None:
+    folder_key = (folder or "").lower()
+    if folder_key == "trash":
+        trash_message(encrypted_credentials, remote_id)
+        return
+
+    service, _ = _build_service(encrypted_credentials)
+    add_labels: list[str] = []
+    remove_labels: list[str] = []
+
+    if folder_key == "archive":
+        remove_labels = ["INBOX"]
+    elif folder_key == "inbox":
+        add_labels = ["INBOX"]
+        remove_labels = ["SPAM", "TRASH"]
+    elif folder_key == "spam":
+        add_labels = ["SPAM"]
+        remove_labels = ["INBOX"]
+    else:
+        add_labels = [_folder_to_label(folder)]
+        remove_labels = ["INBOX"]
+
+    body = {}
+    if add_labels:
+        body["addLabelIds"] = add_labels
+    if remove_labels:
+        body["removeLabelIds"] = remove_labels
+    if body:
+        service.users().messages().modify(userId="me", id=remote_id, body=body).execute()
+
+
 def get_message_state(encrypted_credentials: str, remote_id: str) -> dict | None:
     service, _ = _build_service(encrypted_credentials)
     try:
@@ -243,7 +274,9 @@ def _parse_gmail_message(msg_data: dict) -> Optional[dict]:
         thread_id = msg_data.get("threadId")
         gmail_id = msg_data.get("id")
 
-        body_text, body_html = _extract_body(msg_data.get("payload", {}))
+        payload = msg_data.get("payload", {})
+        body_text, body_html = _extract_body(payload)
+        attachments = _extract_attachments(payload)
 
         return {
             "remote_id": gmail_id,
@@ -262,7 +295,7 @@ def _parse_gmail_message(msg_data: dict) -> Optional[dict]:
             "is_spam": "SPAM" in labels,
             "is_deleted": "TRASH" in labels,
             "received_at": datetime.fromtimestamp(int(msg_data.get("internalDate", 0)) / 1000),
-            "attachments": [],
+            "attachments": attachments,
             "uid": None,
         }
     except Exception:
@@ -291,3 +324,24 @@ def _extract_body(payload: dict) -> tuple[Optional[str], Optional[str]]:
                 body_html = h
 
     return body_text, body_html
+
+
+def _extract_attachments(payload: dict) -> list[dict]:
+    attachments: list[dict] = []
+
+    def walk(part: dict) -> None:
+        filename = part.get("filename") or ""
+        body = part.get("body") or {}
+        attachment_id = body.get("attachmentId")
+        if filename or attachment_id:
+            attachments.append({
+                "name": filename or "attachment",
+                "content_type": part.get("mimeType", "application/octet-stream"),
+                "size": int(body.get("size") or 0),
+                "attachment_id": attachment_id,
+            })
+        for child in part.get("parts", []) or []:
+            walk(child)
+
+    walk(payload)
+    return attachments

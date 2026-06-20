@@ -18,6 +18,7 @@ from app.models.message import Message, MessageStatus
 from app.models.folder import Folder
 
 router = APIRouter()
+MAX_DEDUPE_SCAN = 5000
 
 
 # ── Schemas ────────────────────────────────────────────────────────────────
@@ -25,6 +26,8 @@ router = APIRouter()
 class MessageOut(BaseModel):
     id: str
     account_id: str
+    folder_id: str | None = None
+    folder_type: str | None = None
     subject: str | None
     from_address: str
     from_name: str | None
@@ -94,6 +97,12 @@ class AssistantDraftResponse(BaseModel):
     safety_note: str
 
 
+class ContactSuggestion(BaseModel):
+    email: str
+    name: str | None = None
+    count: int
+
+
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
 async def _get_user_account_ids(db: AsyncSession, user_id: uuid.UUID) -> list[uuid.UUID]:
@@ -146,6 +155,12 @@ async def _push_remote_action(account: EmailAccount, msg: Message, action: str, 
                 gmail_service.archive_message(account.encrypted_credentials, msg.remote_id)
             elif action == "delete":
                 gmail_service.trash_message(account.encrypted_credentials, msg.remote_id)
+            elif action == "move" and kwargs.get("target_folder_remote_name"):
+                gmail_service.move_message(
+                    account.encrypted_credentials,
+                    msg.remote_id,
+                    kwargs["target_folder_remote_name"],
+                )
 
         await asyncio.to_thread(_run_gmail)
         return
@@ -159,6 +174,12 @@ async def _push_remote_action(account: EmailAccount, msg: Message, action: str, 
             elif action == "flag":
                 outlook_service.set_flagged(account.encrypted_credentials, msg.remote_id, kwargs.get("is_flagged", True))
             elif action == "archive" and kwargs.get("target_folder_remote_name"):
+                return outlook_service.move_message(
+                    account.encrypted_credentials,
+                    msg.remote_id,
+                    kwargs["target_folder_remote_name"],
+                )
+            elif action == "move" and kwargs.get("target_folder_remote_name"):
                 return outlook_service.move_message(
                     account.encrypted_credentials,
                     msg.remote_id,
@@ -212,6 +233,16 @@ async def _push_remote_action(account: EmailAccount, msg: Message, action: str, 
                 msg.uid,
                 target_folder,
             )
+        elif action == "move":
+            await imap_service.move_message(
+                account.encrypted_credentials,
+                account.imap_host,
+                account.imap_port,
+                account.imap_ssl,
+                source_folder,
+                msg.uid,
+                kwargs.get("target_folder_remote_name"),
+            )
         elif action == "delete":
             await imap_service.move_message(
                 account.encrypted_credentials,
@@ -235,11 +266,116 @@ async def _refresh_counts(db: AsyncSession, account_id: uuid.UUID) -> None:
     if not account:
         return
 
+    if await _refresh_provider_counts(db, account):
+        return
+
+    await _refresh_local_counts(db, account)
+
+
+async def _refresh_provider_counts(db: AsyncSession, account: EmailAccount) -> bool:
+    try:
+        if account.account_type == AccountType.GMAIL:
+            return await _refresh_gmail_counts(db, account)
+        if account.account_type == AccountType.IMAP:
+            return await _refresh_imap_counts(db, account)
+        if account.account_type == AccountType.OUTLOOK:
+            return await _refresh_outlook_counts(db, account)
+    except Exception:
+        return False
+    return False
+
+
+async def _refresh_gmail_counts(db: AsyncSession, account: EmailAccount) -> bool:
+    from app.services import gmail as gmail_service
+
+    changed = False
+    result = await db.execute(select(Folder).where(Folder.account_id == account.id))
+    folders = result.scalars().all()
+    for folder in folders:
+        if folder.folder_type not in {"inbox", "sent", "drafts", "spam", "trash"}:
+            continue
+        try:
+            stats = await asyncio.to_thread(
+                gmail_service.get_label_stats,
+                account.encrypted_credentials,
+                folder.folder_type,
+            )
+        except Exception:
+            continue
+        folder.total_messages = int(stats.get("total_messages") or 0)
+        folder.unread_count = int(stats.get("unread_count") or 0)
+        changed = True
+
+    if changed:
+        inbox = next((folder for folder in folders if folder.folder_type == "inbox"), None)
+        account.unread_count = inbox.unread_count if inbox else 0
+        account.total_messages = sum(
+            folder.total_messages for folder in folders if folder.folder_type != "trash"
+        )
+    return changed
+
+
+async def _refresh_imap_counts(db: AsyncSession, account: EmailAccount) -> bool:
+    if not account.imap_host or not account.imap_port:
+        return False
+    from app.services import imap as imap_service
+
+    remote_folders = await imap_service.fetch_folders(
+        account.encrypted_credentials,
+        account.imap_host,
+        account.imap_port,
+        account.imap_ssl,
+    )
+    result = await db.execute(select(Folder).where(Folder.account_id == account.id))
+    folders = {(folder.remote_name or ""): folder for folder in result.scalars().all()}
+    changed = False
+    for remote in remote_folders:
+        folder = folders.get(remote.get("remote_name") or "")
+        if not folder:
+            continue
+        folder.total_messages = int(remote.get("total_messages") or 0)
+        folder.unread_count = int(remote.get("unread_count") or 0)
+        changed = True
+
+    if changed:
+        inbox = next((folder for folder in folders.values() if folder.folder_type == "inbox"), None)
+        account.unread_count = inbox.unread_count if inbox else 0
+        account.total_messages = sum(
+            folder.total_messages for folder in folders.values() if folder.folder_type != "trash"
+        )
+    return changed
+
+
+async def _refresh_outlook_counts(db: AsyncSession, account: EmailAccount) -> bool:
+    from app.services import outlook as outlook_service
+
+    remote_folders = await asyncio.to_thread(outlook_service.list_folders, account.encrypted_credentials)
+    result = await db.execute(select(Folder).where(Folder.account_id == account.id))
+    folders = {(folder.remote_name or ""): folder for folder in result.scalars().all()}
+    changed = False
+    for remote in remote_folders:
+        folder = folders.get(remote.get("remote_name") or "")
+        if not folder:
+            continue
+        folder.total_messages = int(remote.get("total_messages") or 0)
+        folder.unread_count = int(remote.get("unread_count") or 0)
+        changed = True
+
+    if changed:
+        inbox = next((folder for folder in folders.values() if folder.folder_type == "inbox"), None)
+        account.unread_count = inbox.unread_count if inbox else 0
+        account.total_messages = sum(
+            folder.total_messages for folder in folders.values() if folder.folder_type != "trash"
+        )
+    return changed
+
+
+async def _refresh_local_counts(db: AsyncSession, account: EmailAccount) -> None:
     visible = (
         select(func.count())
         .select_from(Message)
         .where(
-            Message.account_id == account_id,
+            Message.account_id == account.id,
             Message.is_deleted == False,
             Message.is_draft == False,
         )
@@ -247,13 +383,13 @@ async def _refresh_counts(db: AsyncSession, account_id: uuid.UUID) -> None:
     account.total_messages = await db.scalar(visible) or 0
 
     inbox_unread_count: int | None = None
-    result = await db.execute(select(Folder).where(Folder.account_id == account_id))
+    result = await db.execute(select(Folder).where(Folder.account_id == account.id))
     for folder in result.scalars().all():
         folder_visible = (
             select(func.count())
             .select_from(Message)
             .where(
-                Message.account_id == account_id,
+                Message.account_id == account.id,
                 Message.folder_id == folder.id,
                 Message.is_deleted == False,
                 Message.is_draft == False,
@@ -263,7 +399,7 @@ async def _refresh_counts(db: AsyncSession, account_id: uuid.UUID) -> None:
             folder_visible = (
                 select(func.count())
                 .select_from(Message)
-                .where(Message.account_id == account_id, Message.folder_id == folder.id)
+                .where(Message.account_id == account.id, Message.folder_id == folder.id)
             )
         folder.total_messages = await db.scalar(folder_visible) or 0
         folder.unread_count = await db.scalar(folder_visible.where(Message.is_read == False)) or 0
@@ -280,6 +416,8 @@ def _serialize(m: Message) -> dict:
     return {
         "id": str(m.id),
         "account_id": str(m.account_id),
+        "folder_id": str(m.folder_id) if m.folder_id else None,
+        "folder_type": None,
         "subject": m.subject,
         "from_address": m.from_address,
         "from_name": m.from_name,
@@ -324,6 +462,10 @@ def _dedupe_message_list(messages: list[Message], limit: int, offset: int = 0) -
         if len(result) >= offset + limit:
             break
     return result[offset:offset + limit]
+
+
+def _dedupe_query_limit(limit: int, offset: int) -> int:
+    return offset + min(MAX_DEDUPE_SCAN, max(limit * 10, limit))
 
 
 def _email_only(value: str | None) -> str:
@@ -505,6 +647,7 @@ def _context_summary(current: Message, related: list[Message], similar: list[Mes
 async def smart_folder(
     folder_name: str,
     account_id: uuid.UUID | None = Query(None),
+    search: str | None = Query(None),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     current_user: User = Depends(get_current_user),
@@ -552,7 +695,19 @@ async def smart_folder(
     else:
         raise HTTPException(status_code=404, detail=f"Unknown smart folder: {folder_name}")
 
-    query_limit = offset + (limit * 3)
+    if search:
+        like = f"%{search.strip()}%"
+        q = q.where(
+            or_(
+                Message.subject.ilike(like),
+                Message.from_address.ilike(like),
+                Message.from_name.ilike(like),
+                Message.preview.ilike(like),
+                Message.body_text.ilike(like),
+            )
+        )
+
+    query_limit = _dedupe_query_limit(limit, offset)
     q = q.order_by(Message.received_at.desc()).limit(query_limit)
     result = await db.execute(q)
     messages = result.scalars().all()
@@ -624,11 +779,53 @@ async def list_emails(
             )
         )
 
-    query_limit = offset + (limit * 3)
+    query_limit = _dedupe_query_limit(limit, offset)
     q = q.order_by(Message.received_at.desc()).limit(query_limit)
     result = await db.execute(q)
     messages = _dedupe_message_list(result.scalars().all(), limit, offset)
     return [_serialize(m) for m in messages]
+
+
+@router.get("/contacts/search", response_model=list[ContactSuggestion])
+async def search_contacts(
+    q: str = Query("", min_length=0),
+    limit: int = Query(12, ge=1, le=50),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    account_ids = await _get_user_account_ids(db, current_user.id)
+    if not account_ids:
+        return []
+
+    query = (q or "").strip().lower()
+    result = await db.execute(
+        select(Message.from_address, Message.from_name, Message.to_addresses, Message.cc_addresses)
+        .where(Message.account_id.in_(account_ids))
+        .order_by(Message.received_at.desc().nullslast(), Message.created_at.desc())
+        .limit(1000)
+    )
+
+    contacts: dict[str, dict] = {}
+
+    def add_contact(raw_email: str | None, raw_name: str | None = None) -> None:
+        email = _email_only(raw_email)
+        if not email:
+            return
+        display_name = (raw_name or "").strip() or parseaddr(raw_email or "")[0] or None
+        if query and query not in email.lower() and query not in (display_name or "").lower():
+            return
+        current = contacts.setdefault(email, {"email": email, "name": display_name, "count": 0})
+        current["count"] += 1
+        if not current.get("name") and display_name:
+            current["name"] = display_name
+
+    for from_address, from_name, to_addresses, cc_addresses in result.all():
+        add_contact(from_address, from_name)
+        for item in (to_addresses or []) + (cc_addresses or []):
+            if isinstance(item, dict):
+                add_contact(item.get("email"), item.get("name"))
+
+    return sorted(contacts.values(), key=lambda item: item["count"], reverse=True)[:limit]
 
 
 @router.get("/{message_id}", response_model=MessageDetail)
@@ -955,7 +1152,6 @@ async def archive_email(
     )
     if archive_folder:
         msg.folder_id = archive_folder.id
-    msg.is_read = True
     await _refresh_counts(db, msg.account_id)
     return {"archived": True}
 
@@ -969,6 +1165,8 @@ async def move_email(
 ):
     account_ids = await _get_user_account_ids(db, current_user.id)
     msg = await _get_message(db, message_id, account_ids)
+    account = await _get_account(db, msg.account_id, current_user.id)
+    source_folder = await _get_message_folder(db, msg)
     folder_uuid = uuid.UUID(data.folder_id)
     result = await db.execute(
         select(Folder).where(
@@ -979,7 +1177,25 @@ async def move_email(
     folder = result.scalar_one_or_none()
     if not folder:
         raise HTTPException(status_code=404, detail="Folder not found")
+    remote_action = "delete" if folder.folder_type == "trash" else "move"
+    await _push_remote_action(
+        account,
+        msg,
+        remote_action,
+        source_folder_remote_name=source_folder.remote_name if source_folder else None,
+        target_folder_remote_name=folder.remote_name,
+    )
     msg.folder_id = folder.id
+    msg.is_deleted = folder.folder_type == "trash"
+    msg.is_spam = folder.folder_type == "spam"
+    msg.is_draft = folder.folder_type == "drafts"
+    if msg.is_deleted:
+        msg.status = MessageStatus.DELETED
+    elif msg.is_draft:
+        msg.status = MessageStatus.DRAFT
+    else:
+        msg.status = MessageStatus.READ if msg.is_read else MessageStatus.UNREAD
+    await _refresh_counts(db, msg.account_id)
     return {"moved": True}
 
 
