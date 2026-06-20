@@ -1,5 +1,5 @@
 import uuid
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -15,7 +15,6 @@ router = APIRouter()
 @router.post("/trigger/{account_id}")
 async def trigger_sync(
     account_id: uuid.UUID,
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -31,14 +30,13 @@ async def trigger_sync(
         task = sync_account.delay(str(account_id))
         return {"task_id": task.id, "message": "Sync started", "backend": "celery"}
 
-    from app.tasks.sync_tasks import sync_account_now
-    background_tasks.add_task(sync_account_now, str(account_id))
-    return {"message": "Sync started", "backend": "inprocess"}
+    from app.tasks.inprocess_sync_queue import enqueue_account_sync
+    queue_result = enqueue_account_sync(str(account_id))
+    return {"message": "Sync queued", "backend": "inprocess-queue", **queue_result}
 
 
 @router.post("/trigger-all")
 async def trigger_sync_all(
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -55,8 +53,14 @@ async def trigger_sync_all(
             task_ids.append(task.id)
         return {"task_ids": task_ids, "accounts_queued": len(accounts), "backend": "celery"}
 
-    from app.tasks.sync_tasks import sync_account_now
+    from app.tasks.inprocess_sync_queue import enqueue_account_sync
+    queued = 0
+    skipped = 0
     for account in accounts:
-        background_tasks.add_task(sync_account_now, str(account.id))
+        result = enqueue_account_sync(str(account.id))
+        if result["queued"]:
+            queued += 1
+        else:
+            skipped += 1
 
-    return {"accounts_queued": len(accounts), "backend": "inprocess"}
+    return {"accounts_queued": queued, "accounts_skipped": skipped, "backend": "inprocess-queue"}

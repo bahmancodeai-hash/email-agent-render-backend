@@ -1,8 +1,8 @@
-import uuid
 from pydantic import BaseModel, Field
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+import uuid
 
 from app.api.auth import get_current_user
 from app.api.accounts import _serialize_account, _sort_accounts_az
@@ -13,6 +13,7 @@ from app.services import cpanel
 from app.services.crypto import encrypt_credentials
 from app.services import imap as imap_service
 from app.services.network_guard import ALLOWED_IMAP_PORTS, ALLOWED_SMTP_PORTS, validate_mail_endpoint
+from app.tasks.inprocess_sync_queue import enqueue_account_sync
 
 
 router = APIRouter()
@@ -95,7 +96,6 @@ async def list_cpanel_mailboxes(
 @router.post("/cpanel/connect", response_model=dict)
 async def connect_existing_mailbox(
     data: ConnectMailboxRequest,
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -109,14 +109,13 @@ async def connect_existing_mailbox(
     await db.flush()
     await _sort_accounts_az(db, current_user.id)
     await db.commit()
-    background_tasks.add_task(_sync_account, str(account.id))
+    enqueue_account_sync(str(account.id))
     return {"connected": True, "account": _serialize_account(account)}
 
 
 @router.post("/cpanel/mailboxes", response_model=dict, status_code=201)
 async def create_cpanel_mailbox(
     data: CreateMailboxRequest,
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -133,7 +132,7 @@ async def create_cpanel_mailbox(
         await db.flush()
         await _sort_accounts_az(db, current_user.id)
         await db.commit()
-        background_tasks.add_task(_sync_account, str(account.id))
+        enqueue_account_sync(str(account.id))
     return {
         "created": True,
         "mailbox": mailbox.__dict__,
@@ -199,8 +198,3 @@ async def _connect_mailbox_to_agent(
     )
     db.add(account)
     return account
-
-
-def _sync_account(account_id: str) -> None:
-    from app.tasks.sync_tasks import sync_account_now
-    sync_account_now(account_id)
