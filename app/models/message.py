@@ -25,24 +25,24 @@ class Message(Base):
 
     # Remote identifiers
     uid: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    remote_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
-    message_id: Mapped[str | None] = mapped_column(String(512), nullable=True, index=True)  # Message-ID header
-    thread_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)  # Gmail thread ID
+    remote_id: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
+    message_id: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)  # Message-ID header
+    thread_id: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)  # Gmail thread ID
 
     # Headers
     subject: Mapped[str | None] = mapped_column(Text, nullable=True)
-    from_address: Mapped[str] = mapped_column(String(500), nullable=False)
-    from_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    from_address: Mapped[str] = mapped_column(Text, nullable=False)
+    from_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     to_addresses: Mapped[list | None] = mapped_column(JSONB, nullable=True)  # [{email, name}]
     cc_addresses: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     bcc_addresses: Mapped[list | None] = mapped_column(JSONB, nullable=True)
-    reply_to: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    in_reply_to: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    reply_to: Mapped[str | None] = mapped_column(Text, nullable=True)
+    in_reply_to: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Content
     body_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     body_html: Mapped[str | None] = mapped_column(Text, nullable=True)
-    preview: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    preview: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Attachments metadata stored in JSONB
     attachments: Mapped[list | None] = mapped_column(JSONB, nullable=True)  # [{name, size, content_type, storage_key}]
