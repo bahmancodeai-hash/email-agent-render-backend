@@ -11,6 +11,7 @@ from app.services.crypto import decrypt_credentials
 
 
 _executor = ThreadPoolExecutor(max_workers=20)
+_FETCH_BATCH_SIZE = 25
 
 
 def _connect_imap(host: str, port: int, username: str, password: str, ssl: bool = True) -> IMAPClient:
@@ -92,17 +93,22 @@ def _fetch_messages_sync(
             return []
 
         messages = []
-        fetch_data = client.fetch(uids, ["RFC822", "FLAGS", "INTERNALDATE", "UID"])
-        for uid, data in fetch_data.items():
+        for start in range(0, len(uids), _FETCH_BATCH_SIZE):
+            batch = uids[start:start + _FETCH_BATCH_SIZE]
             try:
-                raw = data.get(b"RFC822", b"")
-                flags = data.get(b"FLAGS", [])
-                internal_date = data.get(b"INTERNALDATE")
-                msg = email.message_from_bytes(raw, policy=email.policy.default)
-                parsed = _parse_message(msg, uid, flags, internal_date)
-                messages.append(parsed)
+                fetch_data = client.fetch(batch, ["RFC822", "FLAGS", "INTERNALDATE", "UID"])
             except Exception:
                 continue
+            for uid, data in fetch_data.items():
+                try:
+                    raw = data.get(b"RFC822", b"")
+                    flags = data.get(b"FLAGS", [])
+                    internal_date = data.get(b"INTERNALDATE")
+                    msg = email.message_from_bytes(raw, policy=email.policy.default)
+                    parsed = _parse_message(msg, uid, flags, internal_date)
+                    messages.append(parsed)
+                except Exception:
+                    continue
         return messages
     finally:
         client.logout()
