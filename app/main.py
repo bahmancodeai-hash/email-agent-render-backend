@@ -28,7 +28,7 @@ async def lifespan(app: FastAPI):
     if settings.auto_create_tables:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-        await _ensure_runtime_schema()
+    await _ensure_runtime_schema()
     await background_scheduler.start()
     try:
         yield
