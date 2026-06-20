@@ -20,6 +20,7 @@ class DedupeMessagesOut(BaseModel):
 
 
 class MessageColumnOut(BaseModel):
+    table_schema: str
     column_name: str
     data_type: str
     character_maximum_length: int | None = None
@@ -48,10 +49,10 @@ def _get_message_columns() -> list[dict]:
 
     with _engine.begin() as conn:
         rows = conn.execute(text("""
-            SELECT column_name, data_type, character_maximum_length
+            SELECT table_schema, column_name, data_type, character_maximum_length
             FROM information_schema.columns
             WHERE table_name = 'messages'
-            ORDER BY ordinal_position
+            ORDER BY table_schema, ordinal_position
         """)).mappings().all()
         return [dict(row) for row in rows]
 
