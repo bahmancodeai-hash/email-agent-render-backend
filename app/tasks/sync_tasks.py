@@ -54,6 +54,13 @@ def _normalize_message_id(value: Any) -> str | None:
     return normalized
 
 
+def _truncate_text(value: Any, limit: int) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    return text[:limit]
+
+
 def _normalized_payload(message: dict[str, Any]) -> dict[str, Any]:
     payload = dict(message)
     payload["message_id"] = _normalize_message_id(payload.get("message_id"))
@@ -61,6 +68,15 @@ def _normalized_payload(message: dict[str, Any]) -> dict[str, Any]:
     payload["in_reply_to"] = _normalize_message_id(payload.get("in_reply_to"))
     if not payload.get("thread_id"):
         payload["thread_id"] = payload.get("in_reply_to") or payload.get("message_id")
+
+    payload["remote_id"] = _truncate_text(payload.get("remote_id"), 255)
+    payload["message_id"] = _truncate_text(payload.get("message_id"), 512)
+    payload["thread_id"] = _truncate_text(payload.get("thread_id"), 255)
+    payload["from_address"] = _truncate_text(payload.get("from_address"), 500) or ""
+    payload["from_name"] = _truncate_text(payload.get("from_name"), 255)
+    payload["reply_to"] = _truncate_text(payload.get("reply_to"), 500)
+    payload["in_reply_to"] = _truncate_text(payload.get("in_reply_to"), 512)
+    payload["preview"] = _truncate_text(payload.get("preview"), 500)
     return payload
 
 
