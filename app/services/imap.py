@@ -55,19 +55,23 @@ def _detect_folder_type(flags, name: str) -> str:
     for flag in flags:
         if flag in flag_map:
             return flag_map[flag]
-    name_lower = name.lower()
-    if "inbox" in name_lower:
-        return "inbox"
-    if "sent" in name_lower:
+
+    name_lower = name.replace("\\", "/").replace(".", "/").lower()
+    base_name = name_lower.rsplit("/", 1)[-1]
+    candidates = [base_name, name_lower]
+
+    if any("sent" in value for value in candidates):
         return "sent"
-    if "draft" in name_lower:
+    if any("draft" in value for value in candidates):
         return "drafts"
-    if "trash" in name_lower or "deleted" in name_lower:
+    if any("trash" in value or "deleted" in value or value == "bin" for value in candidates):
         return "trash"
-    if "spam" in name_lower or "junk" in name_lower:
+    if any("spam" in value or "junk" in value for value in candidates):
         return "spam"
-    if "archive" in name_lower:
+    if any("archive" in value for value in candidates):
         return "archive"
+    if base_name == "inbox" or name_lower == "inbox":
+        return "inbox"
     return "custom"
 
 
