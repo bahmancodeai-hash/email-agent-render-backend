@@ -517,23 +517,34 @@ def _sync_imap(db: Session, account):
                 m = _normalized_payload(m)
                 existing = _find_existing_message(db, Message, account.id, folder.id, m)
                 if not existing:
-                    cols = {c.name for c in Message.__table__.columns}
-                    msg = Message(
-                        account_id=account.id,
-                        folder_id=folder.id,
-                        status=MessageStatus.UNREAD if not m["is_read"] else MessageStatus.READ,
-                        **{k: v for k, v in m.items() if k in cols},
-                    )
-                    db.add(msg)
-                    db.flush()
-                    if folder.folder_type == "inbox":
-                        for rule in rules:
-                            if matches_rule(msg, rule):
-                                loop.run_until_complete(apply_rule_actions(msg, rule, db))
-                                rule.times_triggered += 1
-                                rule.last_triggered_at = datetime.utcnow()
-                                if rule.stop_processing:
-                                    break
+                    try:
+                        with db.begin_nested():
+                            cols = {c.name for c in Message.__table__.columns}
+                            msg = Message(
+                                account_id=account.id,
+                                folder_id=folder.id,
+                                status=MessageStatus.UNREAD if not m["is_read"] else MessageStatus.READ,
+                                **{k: v for k, v in m.items() if k in cols},
+                            )
+                            db.add(msg)
+                            db.flush()
+                            if folder.folder_type == "inbox":
+                                for rule in rules:
+                                    if matches_rule(msg, rule):
+                                        loop.run_until_complete(apply_rule_actions(msg, rule, db))
+                                        rule.times_triggered += 1
+                                        rule.last_triggered_at = datetime.utcnow()
+                                        if rule.stop_processing:
+                                            break
+                    except Exception as exc:
+                        logger.warning(
+                            "Skipping IMAP message for account=%s folder=%s uid=%s: %s",
+                            account.id,
+                            folder.remote_name,
+                            m.get("uid"),
+                            str(exc)[:300],
+                        )
+                        continue
                 else:
                     _merge_existing_message(existing, m, MessageStatus)
             db.flush()
