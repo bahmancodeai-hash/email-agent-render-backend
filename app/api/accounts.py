@@ -48,6 +48,7 @@ class AccountOut(BaseModel):
     email_address: str
     display_name: str | None
     status: str
+    error_message: str | None = None
     last_sync_at: str | None
     unread_count: int
     group_tag: str | None
@@ -85,6 +86,7 @@ def _serialize_account(account: EmailAccount, inbox_unread_count: int | None = N
         "email_address": account.email_address,
         "display_name": account.display_name,
         "status": account.status.value if hasattr(account.status, "value") else account.status,
+        "error_message": account.error_message,
         "last_sync_at": account.last_sync_at.isoformat() if account.last_sync_at else None,
         "unread_count": inbox_unread_count if inbox_unread_count is not None else account.unread_count,
         "group_tag": account.group_tag,
