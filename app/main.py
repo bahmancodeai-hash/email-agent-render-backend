@@ -12,14 +12,26 @@ from app.services.background_scheduler import background_scheduler
 async def _ensure_runtime_schema() -> None:
     async with engine.begin() as conn:
         await conn.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS remote_id VARCHAR(255)"))
-        await conn.execute(text("ALTER TABLE messages ALTER COLUMN remote_id TYPE TEXT"))
-        await conn.execute(text("ALTER TABLE messages ALTER COLUMN message_id TYPE TEXT"))
-        await conn.execute(text("ALTER TABLE messages ALTER COLUMN thread_id TYPE TEXT"))
-        await conn.execute(text("ALTER TABLE messages ALTER COLUMN from_address TYPE TEXT"))
-        await conn.execute(text("ALTER TABLE messages ALTER COLUMN from_name TYPE TEXT"))
-        await conn.execute(text("ALTER TABLE messages ALTER COLUMN reply_to TYPE TEXT"))
-        await conn.execute(text("ALTER TABLE messages ALTER COLUMN in_reply_to TYPE TEXT"))
-        await conn.execute(text("ALTER TABLE messages ALTER COLUMN preview TYPE TEXT"))
+        columns = (
+            "remote_id",
+            "message_id",
+            "thread_id",
+            "from_address",
+            "from_name",
+            "reply_to",
+            "in_reply_to",
+            "preview",
+        )
+        for column in columns:
+            data_type = await conn.scalar(text("""
+                SELECT data_type
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'messages'
+                  AND column_name = :column
+            """), {"column": column})
+            if data_type != "text":
+                await conn.execute(text(f"ALTER TABLE messages ALTER COLUMN {column} TYPE TEXT"))
         await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_messages_remote_id ON messages (remote_id)"))
 
 
