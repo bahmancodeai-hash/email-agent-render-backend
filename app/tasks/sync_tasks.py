@@ -62,6 +62,66 @@ def _should_skip_imap_message(skip_entries: set[tuple[str, str, int]], account, 
         uid_value,
     ) in skip_entries
 
+
+def _strict_clamp_accounts() -> set[str]:
+    return {
+        item.strip().lower()
+        for item in (settings.imap_strict_clamp_accounts or "").split(",")
+        if item.strip()
+    }
+
+
+def _clamp_address_list(value: Any, limit: int = 200) -> Any:
+    if not isinstance(value, list):
+        return value
+    clamped = []
+    for item in value:
+        if not isinstance(item, dict):
+            clamped.append(item)
+            continue
+        clamped.append({
+            key: (_truncate_text(val, limit) if isinstance(val, str) else val)
+            for key, val in item.items()
+        })
+    return clamped
+
+
+def _clamp_attachments(value: Any, limit: int = 200) -> Any:
+    if not isinstance(value, list):
+        return value
+    clamped = []
+    for item in value:
+        if not isinstance(item, dict):
+            clamped.append(item)
+            continue
+        clamped.append({
+            key: (_truncate_text(val, limit) if isinstance(val, str) else val)
+            for key, val in item.items()
+        })
+    return clamped
+
+
+def _strict_clamp_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    clamped = dict(payload)
+    for field in (
+        "remote_id",
+        "message_id",
+        "thread_id",
+        "subject",
+        "from_address",
+        "from_name",
+        "reply_to",
+        "in_reply_to",
+        "preview",
+    ):
+        clamped[field] = _truncate_text(clamped.get(field), 200)
+    clamped["from_address"] = clamped.get("from_address") or ""
+    clamped["to_addresses"] = _clamp_address_list(clamped.get("to_addresses"))
+    clamped["cc_addresses"] = _clamp_address_list(clamped.get("cc_addresses"))
+    clamped["bcc_addresses"] = _clamp_address_list(clamped.get("bcc_addresses"))
+    clamped["attachments"] = _clamp_attachments(clamped.get("attachments"))
+    return clamped
+
 _GMAIL_FOLDER_PRIORITY = {
     "sent": ["[gmail]/sent mail", "sent mail", "sent"],
     "drafts": ["[gmail]/drafts", "drafts"],
@@ -524,6 +584,7 @@ def _sync_imap(db: Session, account):
             EmailRule.is_active == True,
         ).order_by(EmailRule.sort_order).all()
         skip_entries = _imap_skip_entries()
+        strict_clamp = account.email_address.lower() in _strict_clamp_accounts()
 
         for folder in sync_folders:
             max_uid = db.query(Message.uid).filter(
@@ -554,6 +615,8 @@ def _sync_imap(db: Session, account):
                     )
                     continue
                 m = _normalized_payload(m)
+                if strict_clamp:
+                    m = _strict_clamp_payload(m)
                 existing = _find_existing_message(db, Message, account.id, folder.id, m)
                 if not existing:
                     try:

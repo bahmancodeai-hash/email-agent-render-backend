@@ -66,6 +66,7 @@ class Settings(BaseSettings):
     sync_interval_minutes: int = 5
     imap_idle_timeout: int = 1740  # 29 minutes
     imap_skip_uids: str = ""
+    imap_strict_clamp_accounts: str = ""
 
     class Config:
         env_file = ".env"
