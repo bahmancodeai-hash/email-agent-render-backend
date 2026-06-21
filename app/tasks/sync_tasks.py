@@ -638,6 +638,35 @@ def _sync_imap(db: Session, account):
                         batches.append({"before_uid": min_uid, "limit": fetch_limit})
                     if int(folder.unread_count or 0) > 0:
                         batches.append({"limit": min(fetch_limit, 100)})
+                    if int(folder.total_messages or 0) > local_count:
+                        try:
+                            remote_uids = loop.run_until_complete(
+                                imap_service.list_message_uids(
+                                    account.encrypted_credentials,
+                                    account.imap_host,
+                                    account.imap_port,
+                                    account.imap_ssl,
+                                    folder.remote_name,
+                                )
+                            )
+                            local_uids = {
+                                row[0]
+                                for row in db.query(Message.uid).filter(
+                                    Message.account_id == account.id,
+                                    Message.folder_id == folder.id,
+                                    Message.uid != None,
+                                ).all()
+                            }
+                            missing_uids = [uid for uid in remote_uids if uid not in local_uids]
+                            if missing_uids:
+                                batches.append({"uids": missing_uids[-fetch_limit:]})
+                        except Exception as exc:
+                            logger.warning(
+                                "Skipping IMAP UID gap scan for account=%s folder=%s: %s",
+                                account.id,
+                                folder.remote_name,
+                                str(exc)[:300],
+                            )
             except Exception as exc:
                 logger.warning(
                     "Skipping IMAP folder for account=%s folder=%s: %s",
@@ -650,20 +679,34 @@ def _sync_imap(db: Session, account):
             fetched_messages = []
             for request in batches:
                 try:
-                    fetched_messages.extend(
-                        loop.run_until_complete(
-                            imap_service.fetch_messages(
-                                account.encrypted_credentials,
-                                account.imap_host,
-                                account.imap_port,
-                                account.imap_ssl,
-                                folder.remote_name,
-                                since_uid=request.get("since_uid"),
-                                before_uid=request.get("before_uid"),
-                                limit=request["limit"],
+                    if "uids" in request:
+                        fetched_messages.extend(
+                            loop.run_until_complete(
+                                imap_service.fetch_messages_by_uids(
+                                    account.encrypted_credentials,
+                                    account.imap_host,
+                                    account.imap_port,
+                                    account.imap_ssl,
+                                    folder.remote_name,
+                                    request["uids"],
+                                )
                             )
                         )
-                    )
+                    else:
+                        fetched_messages.extend(
+                            loop.run_until_complete(
+                                imap_service.fetch_messages(
+                                    account.encrypted_credentials,
+                                    account.imap_host,
+                                    account.imap_port,
+                                    account.imap_ssl,
+                                    folder.remote_name,
+                                    since_uid=request.get("since_uid"),
+                                    before_uid=request.get("before_uid"),
+                                    limit=request["limit"],
+                                )
+                            )
+                        )
                 except Exception as exc:
                     logger.warning(
                         "Skipping IMAP folder batch for account=%s folder=%s request=%s: %s",

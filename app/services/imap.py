@@ -76,6 +76,38 @@ def _detect_folder_type(flags, name: str) -> str:
     return "custom"
 
 
+def _fetch_uid_messages(client: IMAPClient, uids: list[int]) -> list[dict]:
+    messages = []
+    for start in range(0, len(uids), _FETCH_BATCH_SIZE):
+        batch = uids[start:start + _FETCH_BATCH_SIZE]
+        try:
+            fetch_data = client.fetch(batch, ["RFC822", "FLAGS", "INTERNALDATE", "UID"])
+        except Exception:
+            continue
+        for uid, data in fetch_data.items():
+            try:
+                raw = data.get(b"RFC822", b"")
+                flags = data.get(b"FLAGS", [])
+                internal_date = data.get(b"INTERNALDATE")
+                msg = email.message_from_bytes(raw, policy=email.policy.default)
+                parsed = _parse_message(msg, uid, flags, internal_date)
+                messages.append(parsed)
+            except Exception:
+                continue
+    return messages
+
+
+def _list_message_uids_sync(
+    host: str, port: int, username: str, password: str, ssl: bool, folder_name: str
+) -> list[int]:
+    client = _connect_imap(host, port, username, password, ssl)
+    try:
+        client.select_folder(folder_name, readonly=True)
+        return [int(uid) for uid in client.search(["ALL"])]
+    finally:
+        client.logout()
+
+
 def _fetch_messages_sync(
     host: str, port: int, username: str, password: str, ssl: bool,
     folder_name: str, since_uid: Optional[int] = None, before_uid: Optional[int] = None, limit: int = 50
@@ -93,25 +125,21 @@ def _fetch_messages_sync(
         uids = uids[-limit:]
         if not uids:
             return []
+        return _fetch_uid_messages(client, uids)
+    finally:
+        client.logout()
 
-        messages = []
-        for start in range(0, len(uids), _FETCH_BATCH_SIZE):
-            batch = uids[start:start + _FETCH_BATCH_SIZE]
-            try:
-                fetch_data = client.fetch(batch, ["RFC822", "FLAGS", "INTERNALDATE", "UID"])
-            except Exception:
-                continue
-            for uid, data in fetch_data.items():
-                try:
-                    raw = data.get(b"RFC822", b"")
-                    flags = data.get(b"FLAGS", [])
-                    internal_date = data.get(b"INTERNALDATE")
-                    msg = email.message_from_bytes(raw, policy=email.policy.default)
-                    parsed = _parse_message(msg, uid, flags, internal_date)
-                    messages.append(parsed)
-                except Exception:
-                    continue
-        return messages
+
+def _fetch_messages_by_uids_sync(
+    host: str, port: int, username: str, password: str, ssl: bool,
+    folder_name: str, uids: list[int]
+) -> list[dict]:
+    if not uids:
+        return []
+    client = _connect_imap(host, port, username, password, ssl)
+    try:
+        client.select_folder(folder_name, readonly=True)
+        return _fetch_uid_messages(client, uids)
     finally:
         client.logout()
 
@@ -276,6 +304,31 @@ async def fetch_messages(
         _fetch_messages_sync,
         imap_host, imap_port, creds["username"], creds["password"], imap_ssl,
         folder_name, since_uid, before_uid, limit
+    )
+
+
+async def list_message_uids(
+    encrypted_credentials: str, imap_host: str, imap_port: int, imap_ssl: bool, folder_name: str
+) -> list[int]:
+    creds = decrypt_credentials(encrypted_credentials)
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        _executor,
+        _list_message_uids_sync,
+        imap_host, imap_port, creds["username"], creds["password"], imap_ssl, folder_name
+    )
+
+
+async def fetch_messages_by_uids(
+    encrypted_credentials: str, imap_host: str, imap_port: int, imap_ssl: bool,
+    folder_name: str, uids: list[int]
+) -> list[dict]:
+    creds = decrypt_credentials(encrypted_credentials)
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        _executor,
+        _fetch_messages_by_uids_sync,
+        imap_host, imap_port, creds["username"], creds["password"], imap_ssl, folder_name, uids
     )
 
 
