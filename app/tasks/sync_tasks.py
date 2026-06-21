@@ -585,6 +585,7 @@ def _sync_imap(db: Session, account):
         ).order_by(EmailRule.sort_order).all()
         skip_entries = _imap_skip_entries()
         strict_clamp = account.email_address.lower() in _strict_clamp_accounts()
+        fetch_limit = min(IMAP_FETCH_LIMIT, settings.imap_strict_fetch_limit) if strict_clamp else IMAP_FETCH_LIMIT
 
         for folder in sync_folders:
             max_uid = db.query(Message.uid).filter(
@@ -593,17 +594,26 @@ def _sync_imap(db: Session, account):
                 Message.uid != None,
             ).order_by(Message.uid.desc()).first()
             since_uid = (max_uid[0] + 1) if max_uid and max_uid[0] else None
-            msgs = loop.run_until_complete(
-                imap_service.fetch_messages(
-                    account.encrypted_credentials,
-                    account.imap_host,
-                    account.imap_port,
-                    account.imap_ssl,
-                    folder.remote_name,
-                    since_uid=since_uid,
-                    limit=IMAP_FETCH_LIMIT,
+            try:
+                msgs = loop.run_until_complete(
+                    imap_service.fetch_messages(
+                        account.encrypted_credentials,
+                        account.imap_host,
+                        account.imap_port,
+                        account.imap_ssl,
+                        folder.remote_name,
+                        since_uid=since_uid,
+                        limit=fetch_limit,
+                    )
                 )
-            )
+            except Exception as exc:
+                logger.warning(
+                    "Skipping IMAP folder for account=%s folder=%s: %s",
+                    account.id,
+                    folder.remote_name,
+                    str(exc)[:300],
+                )
+                continue
 
             for m in msgs:
                 if _should_skip_imap_message(skip_entries, account, folder, m):
