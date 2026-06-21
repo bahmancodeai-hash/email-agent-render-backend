@@ -405,6 +405,24 @@ def _refresh_imap_remote_counts(db: Session, account, Folder) -> None:
         folder.unread_count = int(remote_folder.get("unread_count") or 0)
 
 
+def _mark_folder_read_when_remote_empty(db: Session, Message, MessageStatus, account, folder) -> None:
+    if int(folder.unread_count or 0) != 0:
+        return
+    db.query(Message).filter(
+        Message.account_id == account.id,
+        Message.folder_id == folder.id,
+        Message.is_read == False,
+        Message.is_deleted == False,
+        Message.is_draft == False,
+    ).update(
+        {
+            Message.is_read: True,
+            Message.status: MessageStatus.READ,
+        },
+        synchronize_session=False,
+    )
+
+
 def _refresh_outlook_remote_counts(db: Session, account, Folder) -> None:
     from app.services import outlook as outlook_service
 
@@ -588,6 +606,11 @@ def _sync_imap(db: Session, account):
         fetch_limit = min(IMAP_FETCH_LIMIT, settings.imap_strict_fetch_limit) if strict_clamp else IMAP_FETCH_LIMIT
 
         for folder in sync_folders:
+            local_count = db.query(Message.id).filter(
+                Message.account_id == account.id,
+                Message.folder_id == folder.id,
+                Message.uid != None,
+            ).count()
             max_uid_row = db.query(Message.uid).filter(
                 Message.account_id == account.id,
                 Message.folder_id == folder.id,
@@ -600,56 +623,21 @@ def _sync_imap(db: Session, account):
             ).order_by(Message.uid.asc()).first()
             max_uid = max_uid_row[0] if max_uid_row and max_uid_row[0] else None
             min_uid = min_uid_row[0] if min_uid_row and min_uid_row[0] else None
+            batches = []
             try:
                 if strict_clamp:
-                    msgs = []
                     if min_uid and min_uid > 1:
-                        msgs = loop.run_until_complete(
-                            imap_service.fetch_messages(
-                                account.encrypted_credentials,
-                                account.imap_host,
-                                account.imap_port,
-                                account.imap_ssl,
-                                folder.remote_name,
-                                before_uid=min_uid,
-                                limit=fetch_limit,
-                            )
-                        )
+                        batches.append({"before_uid": min_uid, "limit": fetch_limit})
                     elif not max_uid:
-                        msgs = loop.run_until_complete(
-                            imap_service.fetch_messages(
-                                account.encrypted_credentials,
-                                account.imap_host,
-                                account.imap_port,
-                                account.imap_ssl,
-                                folder.remote_name,
-                                limit=fetch_limit,
-                            )
-                        )
+                        batches.append({"limit": fetch_limit})
                     elif max_uid:
-                        msgs = loop.run_until_complete(
-                            imap_service.fetch_messages(
-                                account.encrypted_credentials,
-                                account.imap_host,
-                                account.imap_port,
-                                account.imap_ssl,
-                                folder.remote_name,
-                                since_uid=max_uid + 1,
-                                limit=fetch_limit,
-                            )
-                        )
+                        batches.append({"since_uid": max_uid + 1, "limit": fetch_limit})
                 else:
-                    msgs = loop.run_until_complete(
-                        imap_service.fetch_messages(
-                            account.encrypted_credentials,
-                            account.imap_host,
-                            account.imap_port,
-                            account.imap_ssl,
-                            folder.remote_name,
-                            since_uid=(max_uid + 1) if max_uid else None,
-                            limit=fetch_limit,
-                        )
-                    )
+                    batches.append({"since_uid": (max_uid + 1) if max_uid else None, "limit": fetch_limit})
+                    if min_uid and min_uid > 1 and int(folder.total_messages or 0) > local_count:
+                        batches.append({"before_uid": min_uid, "limit": fetch_limit})
+                    if int(folder.unread_count or 0) > 0:
+                        batches.append({"limit": min(fetch_limit, 100)})
             except Exception as exc:
                 logger.warning(
                     "Skipping IMAP folder for account=%s folder=%s: %s",
@@ -659,7 +647,38 @@ def _sync_imap(db: Session, account):
                 )
                 continue
 
-            for m in msgs:
+            fetched_messages = []
+            for request in batches:
+                try:
+                    fetched_messages.extend(
+                        loop.run_until_complete(
+                            imap_service.fetch_messages(
+                                account.encrypted_credentials,
+                                account.imap_host,
+                                account.imap_port,
+                                account.imap_ssl,
+                                folder.remote_name,
+                                since_uid=request.get("since_uid"),
+                                before_uid=request.get("before_uid"),
+                                limit=request["limit"],
+                            )
+                        )
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Skipping IMAP folder batch for account=%s folder=%s request=%s: %s",
+                        account.id,
+                        folder.remote_name,
+                        request,
+                        str(exc)[:300],
+                    )
+
+            seen_batch_keys = set()
+            for m in fetched_messages:
+                batch_key = (m.get("uid"), m.get("message_id"))
+                if batch_key in seen_batch_keys:
+                    continue
+                seen_batch_keys.add(batch_key)
                 if not strict_clamp and _should_skip_imap_message(skip_entries, account, folder, m):
                     logger.info(
                         "Skipping quarantined IMAP message account=%s folder=%s uid=%s",
@@ -703,6 +722,8 @@ def _sync_imap(db: Session, account):
                         continue
                 else:
                     _merge_existing_message(existing, m, MessageStatus)
+            if not strict_clamp:
+                _mark_folder_read_when_remote_empty(db, Message, MessageStatus, account, folder)
             db.flush()
     finally:
         loop.close()
