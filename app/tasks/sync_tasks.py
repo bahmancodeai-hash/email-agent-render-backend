@@ -603,19 +603,7 @@ def _sync_imap(db: Session, account):
             try:
                 if strict_clamp:
                     msgs = []
-                    if max_uid:
-                        msgs = loop.run_until_complete(
-                            imap_service.fetch_messages(
-                                account.encrypted_credentials,
-                                account.imap_host,
-                                account.imap_port,
-                                account.imap_ssl,
-                                folder.remote_name,
-                                since_uid=max_uid + 1,
-                                limit=fetch_limit,
-                            )
-                        )
-                    if not msgs and min_uid and min_uid > 1:
+                    if min_uid and min_uid > 1:
                         msgs = loop.run_until_complete(
                             imap_service.fetch_messages(
                                 account.encrypted_credentials,
@@ -627,7 +615,7 @@ def _sync_imap(db: Session, account):
                                 limit=fetch_limit,
                             )
                         )
-                    elif not msgs and not max_uid:
+                    elif not max_uid:
                         msgs = loop.run_until_complete(
                             imap_service.fetch_messages(
                                 account.encrypted_credentials,
@@ -635,6 +623,18 @@ def _sync_imap(db: Session, account):
                                 account.imap_port,
                                 account.imap_ssl,
                                 folder.remote_name,
+                                limit=fetch_limit,
+                            )
+                        )
+                    elif max_uid:
+                        msgs = loop.run_until_complete(
+                            imap_service.fetch_messages(
+                                account.encrypted_credentials,
+                                account.imap_host,
+                                account.imap_port,
+                                account.imap_ssl,
+                                folder.remote_name,
+                                since_uid=max_uid + 1,
                                 limit=fetch_limit,
                             )
                         )
