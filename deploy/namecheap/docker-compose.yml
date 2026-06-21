@@ -24,6 +24,7 @@ services:
       - "443:443"
     volumes:
       - ./deploy/namecheap/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./releases:/srv/downloads:ro
       - caddy_data:/data
       - caddy_config:/config
 

@@ -2,6 +2,10 @@
   handle /health {
     reverse_proxy backend:8000
   }
+  handle /downloads/* {
+    root * /srv
+    file_server
+  }
   handle {
     respond 404
   }
