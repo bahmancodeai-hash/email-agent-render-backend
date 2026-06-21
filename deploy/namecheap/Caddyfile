@@ -1,12 +1,21 @@
 :80 {
-  @health path /health
-  reverse_proxy @health backend:8000
-  respond 404
+  handle /health {
+    reverse_proxy backend:8000
+  }
+  handle {
+    respond 404
+  }
 }
 
 api.smartapply.az {
   encode gzip
-  @app path /api/* /health
-  reverse_proxy @app backend:8000
-  respond 404
+  handle /api/* {
+    reverse_proxy backend:8000
+  }
+  handle /health {
+    reverse_proxy backend:8000
+  }
+  handle {
+    respond 404
+  }
 }
