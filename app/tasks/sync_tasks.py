@@ -588,24 +588,68 @@ def _sync_imap(db: Session, account):
         fetch_limit = min(IMAP_FETCH_LIMIT, settings.imap_strict_fetch_limit) if strict_clamp else IMAP_FETCH_LIMIT
 
         for folder in sync_folders:
-            max_uid = db.query(Message.uid).filter(
+            max_uid_row = db.query(Message.uid).filter(
                 Message.account_id == account.id,
                 Message.folder_id == folder.id,
                 Message.uid != None,
             ).order_by(Message.uid.desc()).first()
-            since_uid = (max_uid[0] + 1) if max_uid and max_uid[0] else None
+            min_uid_row = db.query(Message.uid).filter(
+                Message.account_id == account.id,
+                Message.folder_id == folder.id,
+                Message.uid != None,
+            ).order_by(Message.uid.asc()).first()
+            max_uid = max_uid_row[0] if max_uid_row and max_uid_row[0] else None
+            min_uid = min_uid_row[0] if min_uid_row and min_uid_row[0] else None
             try:
-                msgs = loop.run_until_complete(
-                    imap_service.fetch_messages(
-                        account.encrypted_credentials,
-                        account.imap_host,
-                        account.imap_port,
-                        account.imap_ssl,
-                        folder.remote_name,
-                        since_uid=since_uid,
-                        limit=fetch_limit,
+                if strict_clamp:
+                    msgs = []
+                    if max_uid:
+                        msgs = loop.run_until_complete(
+                            imap_service.fetch_messages(
+                                account.encrypted_credentials,
+                                account.imap_host,
+                                account.imap_port,
+                                account.imap_ssl,
+                                folder.remote_name,
+                                since_uid=max_uid + 1,
+                                limit=fetch_limit,
+                            )
+                        )
+                    if not msgs and min_uid and min_uid > 1:
+                        msgs = loop.run_until_complete(
+                            imap_service.fetch_messages(
+                                account.encrypted_credentials,
+                                account.imap_host,
+                                account.imap_port,
+                                account.imap_ssl,
+                                folder.remote_name,
+                                before_uid=min_uid,
+                                limit=fetch_limit,
+                            )
+                        )
+                    elif not msgs and not max_uid:
+                        msgs = loop.run_until_complete(
+                            imap_service.fetch_messages(
+                                account.encrypted_credentials,
+                                account.imap_host,
+                                account.imap_port,
+                                account.imap_ssl,
+                                folder.remote_name,
+                                limit=fetch_limit,
+                            )
+                        )
+                else:
+                    msgs = loop.run_until_complete(
+                        imap_service.fetch_messages(
+                            account.encrypted_credentials,
+                            account.imap_host,
+                            account.imap_port,
+                            account.imap_ssl,
+                            folder.remote_name,
+                            since_uid=(max_uid + 1) if max_uid else None,
+                            limit=fetch_limit,
+                        )
                     )
-                )
             except Exception as exc:
                 logger.warning(
                     "Skipping IMAP folder for account=%s folder=%s: %s",
@@ -616,7 +660,7 @@ def _sync_imap(db: Session, account):
                 continue
 
             for m in msgs:
-                if _should_skip_imap_message(skip_entries, account, folder, m):
+                if not strict_clamp and _should_skip_imap_message(skip_entries, account, folder, m):
                     logger.info(
                         "Skipping quarantined IMAP message account=%s folder=%s uid=%s",
                         account.email_address,

@@ -78,13 +78,15 @@ def _detect_folder_type(flags, name: str) -> str:
 
 def _fetch_messages_sync(
     host: str, port: int, username: str, password: str, ssl: bool,
-    folder_name: str, since_uid: Optional[int] = None, limit: int = 50
+    folder_name: str, since_uid: Optional[int] = None, before_uid: Optional[int] = None, limit: int = 50
 ) -> list[dict]:
     client = _connect_imap(host, port, username, password, ssl)
     try:
         client.select_folder(folder_name, readonly=True)
         if since_uid:
             uids = client.search(["UID", f"{since_uid}:*"])
+        elif before_uid and before_uid > 1:
+            uids = client.search(["UID", f"1:{before_uid - 1}"])
         else:
             uids = client.search(["ALL"])
 
@@ -265,7 +267,7 @@ async def fetch_folders(encrypted_credentials: str, imap_host: str, imap_port: i
 
 async def fetch_messages(
     encrypted_credentials: str, imap_host: str, imap_port: int, imap_ssl: bool,
-    folder_name: str, since_uid: Optional[int] = None, limit: int = 50
+    folder_name: str, since_uid: Optional[int] = None, before_uid: Optional[int] = None, limit: int = 50
 ) -> list[dict]:
     creds = decrypt_credentials(encrypted_credentials)
     loop = asyncio.get_event_loop()
@@ -273,7 +275,7 @@ async def fetch_messages(
         _executor,
         _fetch_messages_sync,
         imap_host, imap_port, creds["username"], creds["password"], imap_ssl,
-        folder_name, since_uid, limit
+        folder_name, since_uid, before_uid, limit
     )
 
 
