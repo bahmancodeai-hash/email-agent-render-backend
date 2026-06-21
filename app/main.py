@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
@@ -8,31 +9,47 @@ from app.database import engine, Base
 from app.api.router import api_router
 from app.services.background_scheduler import background_scheduler
 
+logger = logging.getLogger(__name__)
+
 
 async def _ensure_runtime_schema() -> None:
-    async with engine.begin() as conn:
-        await conn.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS remote_id VARCHAR(255)"))
-        columns = (
-            "remote_id",
-            "message_id",
-            "thread_id",
-            "from_address",
-            "from_name",
-            "reply_to",
-            "in_reply_to",
-            "preview",
-        )
-        for column in columns:
-            data_type = await conn.scalar(text("""
-                SELECT data_type
-                FROM information_schema.columns
-                WHERE table_schema = 'public'
-                  AND table_name = 'messages'
-                  AND column_name = :column
-            """), {"column": column})
-            if data_type != "text":
-                await conn.execute(text(f"ALTER TABLE messages ALTER COLUMN {column} TYPE TEXT"))
-        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_messages_remote_id ON messages (remote_id)"))
+    columns = (
+        "remote_id",
+        "message_id",
+        "thread_id",
+        "from_address",
+        "from_name",
+        "reply_to",
+        "in_reply_to",
+        "preview",
+    )
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text("SET LOCAL statement_timeout = '8s'"))
+            for column in columns:
+                data_type = await conn.scalar(text("""
+                    SELECT data_type
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'messages'
+                      AND column_name = :column
+                """), {"column": column})
+                if data_type is None:
+                    await conn.execute(text(f"ALTER TABLE messages ADD COLUMN {column} TEXT"))
+                elif data_type != "text":
+                    await conn.execute(text(f"ALTER TABLE messages ALTER COLUMN {column} TYPE TEXT"))
+
+            index_exists = await conn.scalar(text("""
+                SELECT 1
+                FROM pg_indexes
+                WHERE schemaname = 'public'
+                  AND tablename = 'messages'
+                  AND indexname = 'ix_messages_remote_id'
+            """))
+            if not index_exists:
+                await conn.execute(text("CREATE INDEX ix_messages_remote_id ON messages (remote_id)"))
+    except Exception as exc:
+        logger.warning("Runtime schema check skipped: %s", exc)
 
 
 @asynccontextmanager
