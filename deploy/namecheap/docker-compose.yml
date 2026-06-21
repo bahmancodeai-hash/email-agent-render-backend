@@ -1,4 +1,20 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: email-agent-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: email_agent
+      POSTGRES_USER: email_agent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U email_agent -d email_agent"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   backend:
     build:
       context: .
@@ -12,6 +28,9 @@ services:
       - "8000"
     mem_limit: 4g
     stop_grace_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   caddy:
     image: caddy:2.8-alpine
@@ -29,5 +48,6 @@ services:
       - caddy_config:/config
 
 volumes:
+  pg_data:
   caddy_data:
   caddy_config:
