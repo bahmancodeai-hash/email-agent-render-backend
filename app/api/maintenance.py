@@ -41,6 +41,16 @@ class ReactivateAccountOut(BaseModel):
     status: str
 
 
+class SyncAccountNowIn(BaseModel):
+    email_address: str
+
+
+class SyncAccountNowOut(BaseModel):
+    id: str
+    email_address: str
+    result: dict
+
+
 def _run_dedupe_messages(apply: bool, batch_size: int, max_batches: int) -> dict:
     with _engine.begin() as conn:
         from sqlalchemy.orm import Session
@@ -104,4 +114,32 @@ async def reactivate_account(
         "email_address": account.email_address,
         "is_active": account.is_active,
         "status": account.status.value if hasattr(account.status, "value") else account.status,
+    }
+
+
+@router.post("/sync-account-now", response_model=SyncAccountNowOut)
+async def sync_account_now_endpoint(
+    data: SyncAccountNowIn,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(EmailAccount).where(
+            EmailAccount.user_id == current_user.id,
+            EmailAccount.email_address == data.email_address.strip().lower(),
+        )
+    )
+    account = result.scalar_one_or_none()
+    if not account:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    from app.tasks.sync_tasks import sync_account_now
+
+    sync_result = await run_in_threadpool(sync_account_now, str(account.id))
+    return {
+        "id": str(account.id),
+        "email_address": account.email_address,
+        "result": sync_result,
     }
