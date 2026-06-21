@@ -15,6 +15,8 @@ from app.tasks.sync_tasks import _engine
 from app.services.dedupe_service import run_message_dedupe
 
 router = APIRouter()
+MAX_MAILSPRING_BATCH = 50
+MAX_MAILSPRING_BODY_CHARS = 800_000
 
 
 class DedupeMessagesOut(BaseModel):
@@ -151,6 +153,10 @@ def _clean(value: str | None, limit: int | None = None) -> str | None:
     if not text:
         return None
     return text[:limit] if limit else text
+
+
+def _body(value: str | None) -> str | None:
+    return _clean(value, MAX_MAILSPRING_BODY_CHARS)
 
 
 def _dt_from_unix(value: int | None) -> datetime | None:
@@ -303,9 +309,9 @@ def _apply_import_payload(message: Message, account: EmailAccount, folder: Folde
     message.reply_to = _clean(data.reply_to, 500)
     message.in_reply_to = _clean(data.in_reply_to, 512)
     if data.body_text:
-        message.body_text = data.body_text
+        message.body_text = _body(data.body_text)
     if data.body_html:
-        message.body_html = data.body_html
+        message.body_html = _body(data.body_html)
     message.preview = _clean(data.preview, 500)
     message.attachments = _attachment_payload(data.attachments)
     message.is_read = bool(data.is_read)
@@ -416,8 +422,8 @@ async def import_mailspring_messages(
         raise HTTPException(status_code=400, detail="email_address is required")
     if not data.messages:
         raise HTTPException(status_code=400, detail="messages are required")
-    if len(data.messages) > 200:
-        raise HTTPException(status_code=400, detail="Import at most 200 messages per batch")
+    if len(data.messages) > MAX_MAILSPRING_BATCH:
+        raise HTTPException(status_code=400, detail=f"Import at most {MAX_MAILSPRING_BATCH} messages per batch")
 
     result = await db.execute(
         select(EmailAccount).where(

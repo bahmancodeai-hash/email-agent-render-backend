@@ -1,0 +1,32 @@
+services:
+  backend:
+    build:
+      context: .
+    container_name: email-agent-backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PORT: "8000"
+    expose:
+      - "8000"
+    mem_limit: 4g
+    stop_grace_period: 30s
+
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: email-agent-caddy
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

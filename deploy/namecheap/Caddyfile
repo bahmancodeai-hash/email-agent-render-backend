@@ -1,0 +1,8 @@
+:80 {
+	reverse_proxy backend:8000
+}
+
+api.smartapply.az {
+	encode gzip
+	reverse_proxy backend:8000
+}
